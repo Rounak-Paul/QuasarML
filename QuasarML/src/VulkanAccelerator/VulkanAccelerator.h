@@ -8,7 +8,7 @@ namespace QuasarML {
 
 class VulkanAccelerator {
     public:
-    VulkanAccelerator(const std::string& name="QuasarAccelerator");
+    VulkanAccelerator(const std::string& name="QuasarAccelerator", u32 gpu_idx=0);
     ~VulkanAccelerator();
 
     void device_wait_idle();

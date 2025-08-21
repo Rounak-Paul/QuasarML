@@ -1,9 +1,9 @@
 #include "Engine.h"
 
 namespace QuasarML {
-Engine::Engine()
+Engine::Engine(const std::string& application_name)
 {
-    _accelerator = new VulkanAccelerator{};
+    _accelerator = new VulkanAccelerator{application_name, 0};
 }
 Engine::~Engine()
 {

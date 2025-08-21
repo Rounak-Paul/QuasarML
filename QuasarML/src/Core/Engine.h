@@ -8,7 +8,7 @@ namespace QuasarML {
 
 class QS_API Engine {
     public:
-    Engine();
+    Engine(const std::string& application_name);
     ~Engine();
 
     Engine(const Engine&) = delete;

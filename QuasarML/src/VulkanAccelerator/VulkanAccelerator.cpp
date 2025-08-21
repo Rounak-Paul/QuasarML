@@ -12,7 +12,7 @@ static void fetch_api_version(VulkanContext& ctx);
 static b8 create_instance(const std::string& name, VulkanContext& ctx);
 static void setup_debug_messenger(VulkanContext& ctx);
 
-VulkanAccelerator::VulkanAccelerator(const std::string& name)
+VulkanAccelerator::VulkanAccelerator(const std::string& name, u32 gpu_idx)
 {
     if (_ctx.validation_enabled) {
         if (_ctx.validation_enabled && !check_validation_layer_support()) {
@@ -42,7 +42,7 @@ VulkanAccelerator::VulkanAccelerator(const std::string& name)
     }
 
     {
-        if (!vulkan_device_create(_ctx.instance, _ctx.device)) {
+        if (!vulkan_device_create(_ctx.instance, gpu_idx, _ctx.device)) {
             LOG_ERROR("Failed to create device!");
         }
         _deletion_queue.push_function([&]() {
