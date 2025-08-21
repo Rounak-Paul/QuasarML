@@ -1,0 +1,9 @@
+[submodule "QuasarML/vendor/VMA"]
+	path = QuasarML/vendor/VMA
+	url = https://github.com/Rounak-Paul/VulkanMemoryAllocator.git
+[submodule "QuasarML/vendor/MIMALLOC/mimalloc"]
+	path = QuasarML/vendor/MIMALLOC/mimalloc
+	url = https://github.com/Rounak-Paul/mimalloc.git
+[submodule "QuasarML/vendor/JSON"]
+	path = QuasarML/vendor/JSON
+	url = https://github.com/Rounak-Paul/json.git

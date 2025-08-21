@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "*._scene": "xml",
+        "typeinfo": "cpp"
+    }
+}
