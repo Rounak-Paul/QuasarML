@@ -14,6 +14,8 @@ class QS_API Engine {
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
 
+    void run_benchmark(size_t iterations);
+
     private:
     VulkanAccelerator* _accelerator;
 };

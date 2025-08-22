@@ -69,6 +69,12 @@ std::vector<VulkanPhysicalDeviceInfo> vulkan_query_physical_devices(VkInstance i
             temp_requirements.device_extension_names.emplace_back("VK_KHR_synchronization2");
         }
 
+        // Add buffer device address extension if needed
+        if (VK_VERSION_MAJOR(info.properties.apiVersion) < 1 || 
+            (VK_VERSION_MAJOR(info.properties.apiVersion) == 1 && VK_VERSION_MINOR(info.properties.apiVersion) < 2)) {
+            temp_requirements.device_extension_names.emplace_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        }
+
         info.meets_requirements = PhysicalDeviceMeetsRequirements(
             physical_devices[i],
             &info.properties,
@@ -132,6 +138,19 @@ static b8 PhysicalDeviceMeetsRequirements(
 
     if (requirements->compute && *out_compute_queue_index == UINT32_MAX) {
         LOG_DEBUG("Device '{}' doesn't support compute queues.", properties->deviceName);
+        return false;
+    }
+
+    // Check buffer device address support
+    VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+    VkPhysicalDeviceFeatures2 device_features2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    device_features2.pNext = &buffer_device_address_features;
+    
+    vkGetPhysicalDeviceFeatures2(device, &device_features2);
+    
+    if (!buffer_device_address_features.bufferDeviceAddress) {
+        LOG_DEBUG("Device '{}' doesn't support buffer device address feature.", properties->deviceName);
         return false;
     }
 
@@ -235,14 +254,19 @@ b8 vulkan_device_create(VkInstance instance, u32 device_index, VulkanDevice& dev
         VK_KHR_COPY_COMMANDS_2_EXTENSION_NAME
     };
 
-    // Check API version support and add sync2 extension if needed
+    // Check API version support and add extensions if needed
     if (device.api_major >= 1 && device.api_minor >= 3) {
         device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_13_FEATURES_BIT;
+        LOG_DEBUG("Device supports Vulkan 1.3+ - using native features");
     } else if (device.api_major >= 1 && device.api_minor >= 2) {
         device.support_flags |= VULKAN_DEVICE_SUPPORT_FLAG_NATIVE_12_FEATURES_BIT;
         extension_names.push_back("VK_KHR_synchronization2");
+        // Buffer device address is core in 1.2, but add extension for safety
+        LOG_DEBUG("Device supports Vulkan 1.2 - buffer device address is core");
     } else {
         extension_names.push_back("VK_KHR_synchronization2");
+        extension_names.push_back(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME);
+        LOG_DEBUG("Device supports Vulkan 1.1 - adding buffer device address extension");
     }
 
 #ifdef QS_PLATFORM_APPLE
@@ -260,9 +284,15 @@ b8 vulkan_device_create(VkInstance instance, u32 device_index, VulkanDevice& dev
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES};
     sync2_features.synchronization2 = VK_TRUE;
 
-    // Chain the features
+    // Add buffer device address features
+    VkPhysicalDeviceBufferDeviceAddressFeatures buffer_device_address_features = {
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES};
+    buffer_device_address_features.bufferDeviceAddress = VK_TRUE;
+
+    // Chain the features: buffer_device_address -> sync2 -> descriptor_indexing
+    buffer_device_address_features.pNext = &sync2_features;
     sync2_features.pNext = &descriptor_indexing_features;
-    device_features.pNext = &sync2_features;
+    device_features.pNext = &buffer_device_address_features;
 
     VkDeviceCreateInfo device_create_info = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     device_create_info.queueCreateInfoCount = 1;
@@ -275,7 +305,7 @@ b8 vulkan_device_create(VkInstance instance, u32 device_index, VulkanDevice& dev
     device_create_info.pNext = &device_features;
 
     VK_CHECK(vkCreateDevice(device.physical_device, &device_create_info, nullptr, &device.logical_device));
-    LOG_DEBUG("Logical device created.");
+    LOG_DEBUG("Logical device created with buffer device address support.");
 
     // Get compute queue (transfer queue will be the same as compute for simplicity)
     vkGetDeviceQueue(device.logical_device, device.compute_queue_index, 0, &device.compute_queue);
