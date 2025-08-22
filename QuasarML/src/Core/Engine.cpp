@@ -21,7 +21,7 @@ Engine::~Engine()
 
 void Engine::run_benchmark(size_t iterations) {
     if (!_accelerator) {
-        std::cerr << "❌ Engine not initialized!" << std::endl;
+        std::cerr << "Engine not initialized!" << std::endl;
         return;
     }
 
@@ -170,11 +170,11 @@ void Engine::run_benchmark(size_t iterations) {
     // Stage 1: Memcopy (0 FLOPs, just bytes moved)
     run_stage(shader_memcopy, "Stage 1: Memory copy", 0.0);
 
-    // Stage 2: Arithmetic (100 iterations * 2 FLOPs)
+    // Stage 2: Arithmetic 
     run_stage(shader_arithmetic, "Stage 2: Arithmetic (FMA-like)", 2048.0);
 
-    // Stage 3: Special functions (~5 FLOPs per loop, 10 loops = 50 FLOPs)
-    // (sin, cos, sqrt ~ we just count them as 5 for a ballpark)
+    // Stage 3: Special functions 
+    // (sin, cos, sqrt)
     run_stage(shader_special, "Stage 3: Special functions", 50.0);
 
     _accelerator->destroy_buffer(input);
