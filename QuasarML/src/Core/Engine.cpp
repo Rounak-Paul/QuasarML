@@ -6,21 +6,21 @@ namespace QuasarML {
 
 Engine::Engine(const std::string& application_name)
 {
-    _accelerator = new VulkanAccelerator{application_name, 0};
+    _backend = new VulkanBackend{application_name, 0};
 }
 
 Engine::~Engine()
 {
-    std::cout << "\nDestroying QuasarML Engine..." << std::endl;
-    if (_accelerator) {
-        delete _accelerator;
-        _accelerator = nullptr;
-        std::cout << "✓ VulkanAccelerator destroyed" << std::endl;
+    LOG_DEBUG("Destroying QuasarML Engine...");
+    if (_backend) {
+        delete _backend;
+        _backend = nullptr;
+        LOG_DEBUG("VulkanBackend destroyed");
     }
 }
 
 void Engine::run_benchmark(size_t iterations) {
-    if (!_accelerator) {
+    if (!_backend) {
         std::cerr << "Engine not initialized!" << std::endl;
         return;
     }
@@ -28,11 +28,11 @@ void Engine::run_benchmark(size_t iterations) {
     const size_t data_size   = 1024 * 1024 * 64; 
     const size_t buffer_size = data_size * sizeof(float);
 
-    auto input  = _accelerator->create_storage_buffer(buffer_size);
-    auto output = _accelerator->create_storage_buffer(buffer_size);
+    auto input  = _backend->create_storage_buffer(buffer_size);
+    auto output = _backend->create_storage_buffer(buffer_size);
 
     std::vector<float> test_data(data_size, 3.14159f);
-    _accelerator->upload_to_buffer(input, test_data.data(), buffer_size);
+    _backend->upload_to_buffer(input, test_data.data(), buffer_size);
 
     // ================================
     // Stage 1: Memory copy throughput
@@ -133,15 +133,15 @@ void Engine::run_benchmark(size_t iterations) {
 
     auto run_stage = [&](const std::string& shader, const char* label,
                          double flops_per_element) {
-        auto pipeline = _accelerator->create_compute_pipeline(shader, 2);
-        _accelerator->bind_buffer_to_pipeline(pipeline, 0, input);
-        _accelerator->bind_buffer_to_pipeline(pipeline, 1, output);
+        auto pipeline = _backend->create_compute_pipeline(shader, 2);
+        _backend->bind_buffer_to_pipeline(pipeline, 0, input);
+        _backend->bind_buffer_to_pipeline(pipeline, 1, output);
 
-        auto dispatch_info = _accelerator->calculate_dispatch_1d(data_size, 256);
+        auto dispatch_info = _backend->calculate_dispatch_1d(data_size, 256);
 
         auto start = std::chrono::high_resolution_clock::now();
         for (size_t i = 0; i < iterations; ++i) {
-            _accelerator->execute_compute(pipeline, dispatch_info);
+            _backend->execute_compute(pipeline, dispatch_info);
         }
         auto end = std::chrono::high_resolution_clock::now();
 
@@ -164,7 +164,7 @@ void Engine::run_benchmark(size_t iterations) {
             std::cout << "Throughput: " << gflops << " GFLOPs\n";
         }
 
-        _accelerator->destroy_compute_pipeline(pipeline);
+        _backend->destroy_compute_pipeline(pipeline);
     };
 
     // Stage 1: Memcopy (0 FLOPs, just bytes moved)
@@ -177,8 +177,8 @@ void Engine::run_benchmark(size_t iterations) {
     // (sin, cos, sqrt)
     run_stage(shader_special, "Stage 3: Special functions", 50.0);
 
-    _accelerator->destroy_buffer(input);
-    _accelerator->destroy_buffer(output);
+    _backend->destroy_buffer(input);
+    _backend->destroy_buffer(output);
 }
 
 } // namespace QuasarML

@@ -2,7 +2,7 @@
 
 #include <qspch.h>
 
-#include <VulkanAccelerator/VulkanAccelerator.h>
+#include <VulkanBackend/VulkanBackend.h>
 
 namespace QuasarML {
 
@@ -17,7 +17,7 @@ class QS_API Engine {
     void run_benchmark(size_t iterations);
 
     private:
-    VulkanAccelerator* _accelerator;
+    VulkanBackend* _backend;
 };
 
 }

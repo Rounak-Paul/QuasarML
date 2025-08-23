@@ -1,4 +1,4 @@
-#include "VulkanAccelerator.h"
+#include "VulkanBackend.h"
 #include "VulkanInitInfo.h"
 
 #define VMA_IMPLEMENTATION
@@ -22,7 +22,7 @@ static b8 create_instance(const std::string& name, VulkanContext& ctx);
 static void setup_debug_messenger(VulkanContext& ctx);
 static b8 load_compute_shader_module(const std::string& glsl_code, VkDevice device, VkShaderModule* out_shader_module);
 
-VulkanAccelerator::VulkanAccelerator(const std::string& name, u32 gpu_idx)
+VulkanBackend::VulkanBackend(const std::string& name, u32 gpu_idx)
 {
     if (_ctx.validation_enabled) {
         if (_ctx.validation_enabled && !check_validation_layer_support()) {
@@ -87,7 +87,7 @@ VulkanAccelerator::VulkanAccelerator(const std::string& name, u32 gpu_idx)
     }
 }
 
-VulkanAccelerator::~VulkanAccelerator()
+VulkanBackend::~VulkanBackend()
 {
     device_wait_idle();
 
@@ -99,12 +99,12 @@ VulkanAccelerator::~VulkanAccelerator()
     _ctx.api_patch = 0;
 }
 
-void VulkanAccelerator::device_wait_idle()
+void VulkanBackend::device_wait_idle()
 {
     vkDeviceWaitIdle(_ctx.device.logical_device);
 }
 
-b8 VulkanAccelerator::create_command_buffers() {
+b8 VulkanBackend::create_command_buffers() {
     VkCommandPoolCreateInfo pool_info = command_pool_create_info(
         _ctx.device.compute_queue_index,  // Use compute queue instead of graphics
         VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
@@ -130,7 +130,7 @@ b8 VulkanAccelerator::create_command_buffers() {
     return true;
 }
 
-b8 VulkanAccelerator::create_sync_objects() {
+b8 VulkanBackend::create_sync_objects() {
     VkFenceCreateInfo fence_info = fence_create_info(VK_FENCE_CREATE_SIGNALED_BIT);
     
     // Main compute fence - for waiting on compute operations to complete
@@ -147,7 +147,7 @@ b8 VulkanAccelerator::create_sync_objects() {
     return true;
 }
 
-VulkanAccelerator::Buffer VulkanAccelerator::create_storage_buffer(VkDeviceSize size, bool host_visible) {
+VulkanBackend::Buffer VulkanBackend::create_storage_buffer(VkDeviceSize size, bool host_visible) {
     Buffer buffer = {};
     buffer.size = size;
     
@@ -175,7 +175,7 @@ VulkanAccelerator::Buffer VulkanAccelerator::create_storage_buffer(VkDeviceSize 
     return buffer;
 }
 
-VulkanAccelerator::Buffer VulkanAccelerator::create_staging_buffer(VkDeviceSize size) {
+VulkanBackend::Buffer VulkanBackend::create_staging_buffer(VkDeviceSize size) {
     Buffer buffer = {};
     buffer.size = size;
     
@@ -196,7 +196,7 @@ VulkanAccelerator::Buffer VulkanAccelerator::create_staging_buffer(VkDeviceSize 
     return buffer;
 }
 
-VulkanAccelerator::Buffer VulkanAccelerator::create_uniform_buffer(VkDeviceSize size) {
+VulkanBackend::Buffer VulkanBackend::create_uniform_buffer(VkDeviceSize size) {
     Buffer buffer = {};
     buffer.size = size;
     
@@ -217,14 +217,14 @@ VulkanAccelerator::Buffer VulkanAccelerator::create_uniform_buffer(VkDeviceSize 
     return buffer;
 }
 
-void VulkanAccelerator::destroy_buffer(Buffer& buffer) {
+void VulkanBackend::destroy_buffer(Buffer& buffer) {
     if (buffer.buffer != VK_NULL_HANDLE) {
         vmaDestroyBuffer(_ctx.allocator, buffer.buffer, buffer.allocation);
         buffer = {};
     }
 }
 
-void VulkanAccelerator::upload_to_buffer(Buffer& buffer, const void* data, VkDeviceSize size, VkDeviceSize offset) {
+void VulkanBackend::upload_to_buffer(Buffer& buffer, const void* data, VkDeviceSize size, VkDeviceSize offset) {
     if (buffer.mapped_data) {
         // Direct copy to mapped memory
         memcpy(static_cast<char*>(buffer.mapped_data) + offset, data, size);
@@ -238,7 +238,7 @@ void VulkanAccelerator::upload_to_buffer(Buffer& buffer, const void* data, VkDev
     }
 }
 
-void VulkanAccelerator::download_from_buffer(Buffer& buffer, void* data, VkDeviceSize size, VkDeviceSize offset) {
+void VulkanBackend::download_from_buffer(Buffer& buffer, void* data, VkDeviceSize size, VkDeviceSize offset) {
     if (buffer.mapped_data) {
         // Direct copy from mapped memory
         vmaInvalidateAllocation(_ctx.allocator, buffer.allocation, offset, size);
@@ -252,7 +252,7 @@ void VulkanAccelerator::download_from_buffer(Buffer& buffer, void* data, VkDevic
     }
 }
 
-void VulkanAccelerator::copy_buffer(Buffer& src, Buffer& dst, VkDeviceSize size, VkDeviceSize src_offset, VkDeviceSize dst_offset) {
+void VulkanBackend::copy_buffer(Buffer& src, Buffer& dst, VkDeviceSize size, VkDeviceSize src_offset, VkDeviceSize dst_offset) {
     // Use immediate command buffer for buffer copies
     VkCommandBufferBeginInfo begin_info = {};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -279,7 +279,7 @@ void VulkanAccelerator::copy_buffer(Buffer& src, Buffer& dst, VkDeviceSize size,
     VK_CHECK(vkWaitForFences(_ctx.device.logical_device, 1, &_imm_fence, VK_TRUE, UINT64_MAX));
 }
 
-VulkanAccelerator::ComputePipeline VulkanAccelerator::create_compute_pipeline(const std::string& glsl_source, 
+VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std::string& glsl_source, 
                                                                              u32 num_storage_buffers,
                                                                              u32 push_constant_size) {
     ComputePipeline pipeline = {};
@@ -374,7 +374,7 @@ VulkanAccelerator::ComputePipeline VulkanAccelerator::create_compute_pipeline(co
     return pipeline;
 }
 
-void VulkanAccelerator::bind_buffer_to_pipeline(ComputePipeline& pipeline, u32 binding, Buffer& buffer) {
+void VulkanBackend::bind_buffer_to_pipeline(ComputePipeline& pipeline, u32 binding, Buffer& buffer) {
     VkDescriptorBufferInfo buffer_info = {};
     buffer_info.buffer = buffer.buffer;
     buffer_info.offset = 0;
@@ -392,7 +392,7 @@ void VulkanAccelerator::bind_buffer_to_pipeline(ComputePipeline& pipeline, u32 b
     vkUpdateDescriptorSets(_ctx.device.logical_device, 1, &write, 0, nullptr);
 }
 
-void VulkanAccelerator::destroy_compute_pipeline(ComputePipeline& pipeline) {
+void VulkanBackend::destroy_compute_pipeline(ComputePipeline& pipeline) {
     if (pipeline.pipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(_ctx.device.logical_device, pipeline.pipeline, nullptr);
     }
@@ -408,7 +408,7 @@ void VulkanAccelerator::destroy_compute_pipeline(ComputePipeline& pipeline) {
     pipeline = {};
 }
 
-void VulkanAccelerator::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z, 
+void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z, 
                                        const void* push_constants, u32 push_constant_size) {
     begin_compute_recording();
     record_compute_dispatch(pipeline, group_x, group_y, group_z, push_constants, push_constant_size);
@@ -416,7 +416,7 @@ void VulkanAccelerator::execute_compute(ComputePipeline& pipeline, u32 group_x, 
     wait_for_compute();
 }
 
-void VulkanAccelerator::begin_compute_recording() {
+void VulkanBackend::begin_compute_recording() {
     VK_CHECK(vkResetCommandBuffer(_compute_command_buffer, 0));
     
     VkCommandBufferBeginInfo begin_info = {};
@@ -427,7 +427,7 @@ void VulkanAccelerator::begin_compute_recording() {
     _recording = true;
 }
 
-void VulkanAccelerator::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
+void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
                                                const void* push_constants, u32 push_constant_size) {
     if (!_recording) {
         LOG_ERROR("Must call begin_compute_recording() first");
@@ -446,7 +446,7 @@ void VulkanAccelerator::record_compute_dispatch(ComputePipeline& pipeline, u32 g
     vkCmdDispatch(_compute_command_buffer, group_x, group_y, group_z);
 }
 
-void VulkanAccelerator::execute_recorded_commands() {
+void VulkanBackend::execute_recorded_commands() {
     if (!_recording) {
         LOG_ERROR("No commands recorded");
         return;
@@ -465,11 +465,11 @@ void VulkanAccelerator::execute_recorded_commands() {
     VK_CHECK(vkQueueSubmit(_ctx.device.compute_queue, 1, &submit_info, _compute_fence));
 }
 
-void VulkanAccelerator::wait_for_compute() {
+void VulkanBackend::wait_for_compute() {
     VK_CHECK(vkWaitForFences(_ctx.device.logical_device, 1, &_compute_fence, VK_TRUE, UINT64_MAX));
 }
 
-void VulkanAccelerator::memory_barrier() {
+void VulkanBackend::memory_barrier() {
     if (!_recording) {
         LOG_ERROR("Must be recording commands to insert memory barrier");
         return;
@@ -486,7 +486,7 @@ void VulkanAccelerator::memory_barrier() {
                         0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 
-VulkanAccelerator::ComputeLimits VulkanAccelerator::get_compute_limits() {
+VulkanBackend::ComputeLimits VulkanBackend::get_compute_limits() {
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(_ctx.device.physical_device, &properties);
     
@@ -500,7 +500,7 @@ VulkanAccelerator::ComputeLimits VulkanAccelerator::get_compute_limits() {
     return limits;
 }
 
-u32 VulkanAccelerator::calculate_dispatch_1d(u32 total_work_items, u32 local_size) {
+u32 VulkanBackend::calculate_dispatch_1d(u32 total_work_items, u32 local_size) {
     return (total_work_items + local_size - 1) / local_size;
 }
 
