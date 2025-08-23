@@ -221,9 +221,9 @@ void Kernel::validate_execution_parameters(u32 dispatch_x, u32 dispatch_y, u32 d
     
     // Check against device limits
     auto limits = _backend->get_compute_limits();
-    if (dispatch_x > limits.max_work_group_size[0] ||
-        dispatch_y > limits.max_work_group_size[1] ||
-        dispatch_z > limits.max_work_group_size[2]) {
+    if (dispatch_x > limits.max_work_group_count[0] ||
+        dispatch_y > limits.max_work_group_count[1] ||
+        dispatch_z > limits.max_work_group_count[2]) {
         throw std::invalid_argument("Dispatch dimensions exceed device limits");
     }
 }

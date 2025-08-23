@@ -493,6 +493,7 @@ VulkanBackend::ComputeLimits VulkanBackend::get_compute_limits() {
     ComputeLimits limits = {};
     for (int i = 0; i < 3; i++) {
         limits.max_work_group_size[i] = properties.limits.maxComputeWorkGroupSize[i];
+        limits.max_work_group_count[i] = properties.limits.maxComputeWorkGroupCount[i];
     }
     limits.max_work_group_invocations = properties.limits.maxComputeWorkGroupInvocations;
     limits.max_shared_memory_size = properties.limits.maxComputeSharedMemorySize;

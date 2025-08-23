@@ -229,6 +229,509 @@ void Accelerator::memory_barrier() {
     _backend->memory_barrier();
 }
 
+// ============================================================================
+// IMPLEMENTATION (Add to Accelerator.cpp)
+// ============================================================================
+
+void Accelerator::tensor_add(std::shared_ptr<Tensor> a, 
+                            std::shared_ptr<Tensor> b, 
+                            std::shared_ptr<Tensor> result) {
+    validate_tensor_op_compatibility(a, b, result);
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputA {
+    float data_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer InputB {
+    float data_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_a.length()) return;
+    
+    data_out[index] = data_a[index] + data_b[index];
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_add", glsl_source, 3);
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
+    
+    execute(kernel, {a, b, result}, dispatch_size);
+}
+
+void Accelerator::tensor_sub(std::shared_ptr<Tensor> a, 
+                            std::shared_ptr<Tensor> b, 
+                            std::shared_ptr<Tensor> result) {
+    validate_tensor_op_compatibility(a, b, result);
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputA {
+    float data_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer InputB {
+    float data_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_a.length()) return;
+    
+    data_out[index] = data_a[index] - data_b[index];
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_sub", glsl_source, 3);
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
+    
+    execute(kernel, {a, b, result}, dispatch_size);
+}
+
+void Accelerator::tensor_mul(std::shared_ptr<Tensor> a, 
+                            std::shared_ptr<Tensor> b, 
+                            std::shared_ptr<Tensor> result) {
+    validate_tensor_op_compatibility(a, b, result);
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputA {
+    float data_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer InputB {
+    float data_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_a.length()) return;
+    
+    data_out[index] = data_a[index] * data_b[index];
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_mul", glsl_source, 3);
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
+    
+    execute(kernel, {a, b, result}, dispatch_size);
+}
+
+void Accelerator::tensor_div(std::shared_ptr<Tensor> a, 
+                            std::shared_ptr<Tensor> b, 
+                            std::shared_ptr<Tensor> result) {
+    validate_tensor_op_compatibility(a, b, result);
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer InputA {
+    float data_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer InputB {
+    float data_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_a.length()) return;
+    
+    data_out[index] = data_a[index] / data_b[index];
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_div", glsl_source, 3);
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
+    
+    execute(kernel, {a, b, result}, dispatch_size);
+}
+
+void Accelerator::tensor_add_scalar(std::shared_ptr<Tensor> tensor, 
+                                   float scalar, 
+                                   std::shared_ptr<Tensor> result) {
+    if (!tensor->is_shape_compatible(*result)) {
+        throw std::invalid_argument("Input and output tensors must have same shape");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    float scalar;
+} pc;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Input {
+    float data_in[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_in.length()) return;
+    
+    data_out[index] = data_in[index] + pc.scalar;
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_add_scalar", glsl_source, 2, sizeof(float));
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    
+    execute(kernel, {tensor, result}, dispatch_size, 1, 1, &scalar);
+}
+
+void Accelerator::tensor_mul_scalar(std::shared_ptr<Tensor> tensor, 
+                                   float scalar, 
+                                   std::shared_ptr<Tensor> result) {
+    if (!tensor->is_shape_compatible(*result)) {
+        throw std::invalid_argument("Input and output tensors must have same shape");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    float scalar;
+} pc;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Input {
+    float data_in[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_in.length()) return;
+    
+    data_out[index] = data_in[index] * pc.scalar;
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_mul_scalar", glsl_source, 2, sizeof(float));
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    
+    execute(kernel, {tensor, result}, dispatch_size, 1, 1, &scalar);
+}
+
+void Accelerator::tensor_relu(std::shared_ptr<Tensor> tensor, 
+                             std::shared_ptr<Tensor> result) {
+    if (!tensor->is_shape_compatible(*result)) {
+        throw std::invalid_argument("Input and output tensors must have same shape");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Input {
+    float data_in[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= data_in.length()) return;
+    
+    data_out[index] = max(0.0, data_in[index]);
+}
+)";
+
+    auto kernel = get_or_create_kernel("tensor_relu", glsl_source, 2);
+    u32 dispatch_size = calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    
+    execute(kernel, {tensor, result}, dispatch_size);
+}
+
+void Accelerator::tensor_matmul(std::shared_ptr<Tensor> a, 
+                               std::shared_ptr<Tensor> b, 
+                               std::shared_ptr<Tensor> result) {
+    validate_tensor_shape_2d(a);
+    validate_tensor_shape_2d(b);
+    validate_tensor_shape_2d(result);
+    
+    auto a_shape = a->get_shape();
+    auto b_shape = b->get_shape();
+    auto result_shape = result->get_shape();
+    
+    if (a_shape[1] != b_shape[0]) {
+        throw std::invalid_argument("Matrix dimensions incompatible for multiplication");
+    }
+    
+    if (result_shape[0] != a_shape[0] || result_shape[1] != b_shape[1]) {
+        throw std::invalid_argument("Result matrix has incorrect dimensions");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint M; // rows of A and result
+    uint N; // cols of B and result  
+    uint K; // cols of A and rows of B
+} pc;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer MatrixA {
+    float data_a[];
+};
+
+layout(set = 0, binding = 1, std430) restrict readonly buffer MatrixB {
+    float data_b[];
+};
+
+layout(set = 0, binding = 2, std430) restrict writeonly buffer Result {
+    float data_result[];
+};
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    uint col = gl_GlobalInvocationID.y;
+    
+    if (row >= pc.M || col >= pc.N) return;
+    
+    float sum = 0.0;
+    for (uint k = 0; k < pc.K; ++k) {
+        sum += data_a[row * pc.K + k] * data_b[k * pc.N + col];
+    }
+    
+    data_result[row * pc.N + col] = sum;
+}
+)";
+
+    struct MatMulPushConstants {
+        u32 M, N, K;
+    } push_data = {
+        a_shape[0],  // M
+        b_shape[1],  // N
+        a_shape[1]   // K
+    };
+
+    auto kernel = get_or_create_kernel("tensor_matmul", glsl_source, 3, sizeof(MatMulPushConstants));
+    
+    u32 dispatch_x = (a_shape[0] + 15) / 16;
+    u32 dispatch_y = (b_shape[1] + 15) / 16;
+    
+    execute(kernel, {a, b, result}, dispatch_x, dispatch_y, 1, &push_data);
+}
+
+void Accelerator::tensor_transpose(std::shared_ptr<Tensor> tensor, 
+                                  std::shared_ptr<Tensor> result) {
+    validate_tensor_shape_2d(tensor);
+    validate_tensor_shape_2d(result);
+    
+    auto input_shape = tensor->get_shape();
+    auto result_shape = result->get_shape();
+    
+    if (input_shape[0] != result_shape[1] || input_shape[1] != result_shape[0]) {
+        throw std::invalid_argument("Result tensor must have transposed dimensions");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+} pc;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Input {
+    float data_in[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint row = gl_GlobalInvocationID.x;
+    uint col = gl_GlobalInvocationID.y;
+    
+    if (row >= pc.rows || col >= pc.cols) return;
+    
+    data_out[col * pc.rows + row] = data_in[row * pc.cols + col];
+}
+)";
+
+    struct TransposePushConstants {
+        u32 rows, cols;
+    } push_data = {
+        input_shape[0],
+        input_shape[1]
+    };
+
+    auto kernel = get_or_create_kernel("tensor_transpose", glsl_source, 2, sizeof(TransposePushConstants));
+    
+    u32 dispatch_x = (input_shape[0] + 15) / 16;
+    u32 dispatch_y = (input_shape[1] + 15) / 16;
+    
+    execute(kernel, {tensor, result}, dispatch_x, dispatch_y, 1, &push_data);
+}
+
+void Accelerator::tensor_sum_axis(std::shared_ptr<Tensor> tensor, 
+                                 std::shared_ptr<Tensor> result, 
+                                 u32 axis) {
+    validate_tensor_shape_2d(tensor);
+    
+    auto input_shape = tensor->get_shape();
+    auto result_shape = result->get_shape();
+    
+    if (axis >= 2) {
+        throw std::invalid_argument("Axis must be 0 or 1 for 2D tensors");
+    }
+    
+    u32 expected_result_size = (axis == 0) ? input_shape[1] : input_shape[0];
+    if (result_shape.size() != 1 || result_shape[0] != expected_result_size) {
+        throw std::invalid_argument("Result tensor has incorrect shape for reduction");
+    }
+    
+    const std::string glsl_source = R"(
+#version 450
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform PushConstants {
+    uint rows;
+    uint cols;
+    uint axis; // 0 = sum rows (result is cols), 1 = sum cols (result is rows)
+} pc;
+
+layout(set = 0, binding = 0, std430) restrict readonly buffer Input {
+    float data_in[];
+};
+
+layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {
+    float data_out[];
+};
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    
+    if (pc.axis == 0) {
+        // Sum along rows (axis=0), output has shape [cols]
+        if (index >= pc.cols) return;
+        
+        float sum = 0.0;
+        for (uint row = 0; row < pc.rows; ++row) {
+            sum += data_in[row * pc.cols + index];
+        }
+        data_out[index] = sum;
+    } else {
+        // Sum along columns (axis=1), output has shape [rows]
+        if (index >= pc.rows) return;
+        
+        float sum = 0.0;
+        for (uint col = 0; col < pc.cols; ++col) {
+            sum += data_in[index * pc.cols + col];
+        }
+        data_out[index] = sum;
+    }
+}
+)";
+
+    struct SumAxisPushConstants {
+        u32 rows, cols, axis;
+    } push_data = {
+        input_shape[0],
+        input_shape[1],
+        axis
+    };
+
+    auto kernel = get_or_create_kernel("tensor_sum_axis", glsl_source, 2, sizeof(SumAxisPushConstants));
+    u32 dispatch_size = calculate_optimal_dispatch_1d(expected_result_size);
+    
+    execute(kernel, {tensor, result}, dispatch_size, 1, 1, &push_data);
+}
+
+// Helper method implementations
+void Accelerator::validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, 
+                                                   std::shared_ptr<Tensor> b, 
+                                                   std::shared_ptr<Tensor> result) const {
+    if (!a->is_valid() || !b->is_valid() || !result->is_valid()) {
+        throw std::invalid_argument("All tensors must be valid");
+    }
+    
+    if (!a->is_shape_compatible(*b) || !a->is_shape_compatible(*result)) {
+        throw std::invalid_argument("All tensors must have compatible shapes");
+    }
+    
+    if (a->get_dtype() != DataType::F32 || b->get_dtype() != DataType::F32 || 
+        result->get_dtype() != DataType::F32) {
+        throw std::invalid_argument("Currently only F32 tensors are supported");
+    }
+}
+
+void Accelerator::validate_tensor_shape_2d(std::shared_ptr<Tensor> tensor) const {
+    if (!tensor->is_valid()) {
+        throw std::invalid_argument("Tensor must be valid");
+    }
+    
+    if (tensor->get_rank() != 2) {
+        throw std::invalid_argument("Tensor must be 2D");
+    }
+    
+    if (tensor->get_dtype() != DataType::F32) {
+        throw std::invalid_argument("Currently only F32 tensors are supported");
+    }
+}
+
+std::shared_ptr<Kernel> Accelerator::get_or_create_kernel(const std::string& name, 
+                                                            const std::string& glsl_source, 
+                                                            u32 num_tensors, u32 push_constant_size) {
+    auto existing_kernel = get_kernel(name);
+    if (existing_kernel) {
+        return existing_kernel;
+    }
+    
+    return create_kernel(name, glsl_source, num_tensors, push_constant_size);
+}
+
 VulkanBackend::ComputeLimits Accelerator::get_device_limits() const {
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");

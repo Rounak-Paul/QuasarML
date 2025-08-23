@@ -103,6 +103,7 @@ class VulkanBackend {
     // Get device compute limits for optimal dispatch sizes
     struct ComputeLimits {
         u32 max_work_group_size[3];
+        u32 max_work_group_count[3];
         u32 max_work_group_invocations;
         u32 max_shared_memory_size;
     };

@@ -203,6 +203,106 @@ public:
     void memory_barrier();
 
     // ============================================================================
+    // TENSOR OPERATIONS
+    // ============================================================================
+
+    /**
+     * @brief Element-wise addition: result = a + b
+     * @param a First input tensor
+     * @param b Second input tensor
+     * @param result Output tensor (must have compatible shape)
+     */
+    void tensor_add(std::shared_ptr<Tensor> a, 
+                    std::shared_ptr<Tensor> b, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Element-wise subtraction: result = a - b
+     * @param a First input tensor
+     * @param b Second input tensor
+     * @param result Output tensor (must have compatible shape)
+     */
+    void tensor_sub(std::shared_ptr<Tensor> a, 
+                    std::shared_ptr<Tensor> b, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Element-wise multiplication: result = a * b
+     * @param a First input tensor
+     * @param b Second input tensor
+     * @param result Output tensor (must have compatible shape)
+     */
+    void tensor_mul(std::shared_ptr<Tensor> a, 
+                    std::shared_ptr<Tensor> b, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Element-wise division: result = a / b
+     * @param a First input tensor
+     * @param b Second input tensor
+     * @param result Output tensor (must have compatible shape)
+     */
+    void tensor_div(std::shared_ptr<Tensor> a, 
+                    std::shared_ptr<Tensor> b, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Scalar addition: result = tensor + scalar
+     * @param tensor Input tensor
+     * @param scalar Scalar value to add
+     * @param result Output tensor (must have same shape as input)
+     */
+    void tensor_add_scalar(std::shared_ptr<Tensor> tensor, 
+                        float scalar, 
+                        std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Scalar multiplication: result = tensor * scalar
+     * @param tensor Input tensor
+     * @param scalar Scalar value to multiply
+     * @param result Output tensor (must have same shape as input)
+     */
+    void tensor_mul_scalar(std::shared_ptr<Tensor> tensor, 
+                        float scalar, 
+                        std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Apply ReLU activation: result = max(0, tensor)
+     * @param tensor Input tensor
+     * @param result Output tensor (must have same shape as input)
+     */
+    void tensor_relu(std::shared_ptr<Tensor> tensor, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Matrix multiplication: result = a @ b
+     * @param a First input tensor (2D matrix)
+     * @param b Second input tensor (2D matrix)
+     * @param result Output tensor (2D matrix with shape [a.rows, b.cols])
+     */
+    void tensor_matmul(std::shared_ptr<Tensor> a, 
+                    std::shared_ptr<Tensor> b, 
+                    std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Transpose 2D tensor: result = tensor^T
+     * @param tensor Input tensor (2D matrix)
+     * @param result Output tensor (2D matrix with transposed dimensions)
+     */
+    void tensor_transpose(std::shared_ptr<Tensor> tensor, 
+                        std::shared_ptr<Tensor> result);
+
+    /**
+     * @brief Sum reduction along specified axis
+     * @param tensor Input tensor
+     * @param result Output tensor (reduced along specified axis)
+     * @param axis Axis to reduce along (0 for rows, 1 for columns in 2D)
+     */
+    void tensor_sum_axis(std::shared_ptr<Tensor> tensor, 
+                        std::shared_ptr<Tensor> result, 
+                        u32 axis);
+
+    // ============================================================================
     // UTILITY METHODS
     // ============================================================================
     
@@ -242,7 +342,16 @@ private:
     // Internal helper methods
     void cleanup_dead_tensor_references();
     void validate_tensor_compatibility(const std::vector<std::shared_ptr<Tensor>>& tensors, 
-                                     std::shared_ptr<Kernel> kernel) const;
+                                        std::shared_ptr<Kernel> kernel) const;
+    
+    // Internal helper methods for tensor operations
+    void validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, 
+                                        std::shared_ptr<Tensor> b, 
+                                        std::shared_ptr<Tensor> result) const;
+    void validate_tensor_shape_2d(std::shared_ptr<Tensor> tensor) const;
+    std::shared_ptr<Kernel> get_or_create_kernel(const std::string& name, 
+                                                const std::string& glsl_source, 
+                                                u32 num_tensors, u32 push_constant_size = 0);
 };
 
 } // namespace QuasarML
