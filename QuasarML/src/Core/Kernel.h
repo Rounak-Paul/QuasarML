@@ -28,7 +28,7 @@ public:
     bool is_valid() const noexcept;
     void bind(uint32_t binding, Tensor& tensor);
     void run(uint32_t group_x, uint32_t group_y = 1, uint32_t group_z = 1,
-             const void* push_constants = nullptr, uint32_t push_constant_size = 0);
+                const void* push_constants = nullptr, uint32_t push_constant_size = 0);
 
 private:
     VulkanBackend* backend_ {nullptr};

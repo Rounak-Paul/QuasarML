@@ -27,11 +27,11 @@ void print_tensor_sample(QuasarML::Tensor& tensor, size_t max_elements = 10) {
 int main(int argc, char** argv) {
 	Accelerator accelerator("QuasarML-GPU");
 
-    Tensor A = accelerator.create_tensor({4096}, DataType::FLOAT32, true);
-    Tensor B = accelerator.create_tensor({4096}, DataType::FLOAT32, true);
+    Tensor A = accelerator.create_tensor({4096}, DataType::FLOAT32, false);
+    Tensor B = accelerator.create_tensor({4096}, DataType::FLOAT32, false);
 
-    std::vector<float> vecA(4096, 1.0f);
-    std::vector<float> vecB(4096, 5.0f);
+    std::vector<float> vecA(4096, 128.0f);
+    std::vector<float> vecB(4096, 512.0f);
     A.upload(vecA.data(), sizeof(float) * vecA.size());
     B.upload(vecB.data(), sizeof(float) * vecB.size());
 

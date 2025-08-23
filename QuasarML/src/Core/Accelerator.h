@@ -18,14 +18,14 @@ public:
     explicit Accelerator(const std::string& name = "QuasarAccelerator", uint32_t gpu_idx = 0);
     ~Accelerator();
 
-    // Tensor creation, fully type safe
+    // Tensor creation
     Tensor create_tensor(const std::vector<uint32_t>& shape, DataType dtype, bool host_visible = false);
 
-    // Kernel creation, fully type safe
+    // Kernel creation
     Kernel create_kernel(const std::string& glsl_source, uint32_t num_storage_buffers,
                         uint32_t push_constant_size = 0);
 
-    // Synchronize all operations to device idle
+    // Synchronize compute operations
     void sync();
 
     VulkanBackend& backend();

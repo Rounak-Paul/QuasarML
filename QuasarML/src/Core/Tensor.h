@@ -8,8 +8,7 @@
 namespace QuasarML {
 
 /**
- * Tensor: Opaque GPU storage, owned by backend. 
- * RAII, supports upload/download and query interfaces.
+ * Tensor: Opaque GPU storage, owned by backend.
  */
 class Tensor {
 public:
