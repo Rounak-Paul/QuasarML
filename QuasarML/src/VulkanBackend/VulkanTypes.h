@@ -30,7 +30,6 @@ typedef struct VulkanContext {
     VmaAllocator allocator;
     VkDebugUtilsMessengerEXT debug_messenger;
 
-    VkSurfaceKHR surface;
     VulkanDevice device;
 } VulkanContext;
 
