@@ -157,10 +157,10 @@ int main(int argc, char** argv) {
 
             // Warmup: run each op a few times so kernels are created once
             for (int i = 0; i < ELEM_WARMUP; ++i) {
-                auto R = accel.add(A, B); R->download_data(sample.data(), sizeof(float) * sample.size(), 0);
-                auto R2 = accel.mul(A, B); R2->download_data(sample.data(), sizeof(float) * sample.size(), 0);
-                auto R3 = accel.add_scalar(A, 1.2345f); R3->download_data(sample.data(), sizeof(float) * sample.size(), 0);
-                auto R4 = accel.mul_scalar(A, 2.0f); R4->download_data(sample.data(), sizeof(float) * sample.size(), 0);
+                auto R = accel.ops().add(A, B); R->download_data(sample.data(), sizeof(float) * sample.size(), 0);
+                auto R2 = accel.ops().mul(A, B); R2->download_data(sample.data(), sizeof(float) * sample.size(), 0);
+                auto R3 = accel.ops().add_scalar(A, 1.2345f); R3->download_data(sample.data(), sizeof(float) * sample.size(), 0);
+                auto R4 = accel.ops().mul_scalar(A, 2.0f); R4->download_data(sample.data(), sizeof(float) * sample.size(), 0);
             }
 
             auto run_batched = [&](const std::string &name,
@@ -193,10 +193,10 @@ int main(int argc, char** argv) {
                           << "  [batch=" << batch_size << "]\n";
             };
 
-            run_batched("Elementwise Add",   [&]() { return accel.add(A, B); }, ELEM_ITERS, ELEM_BATCH, 1.0);
-            run_batched("Elementwise Mul",   [&]() { return accel.mul(A, B); }, ELEM_ITERS, ELEM_BATCH, 1.0);
-            run_batched("Add Scalar",        [&]() { return accel.add_scalar(A, 1.2345f); }, ELEM_ITERS, ELEM_BATCH, 1.0);
-            run_batched("Mul Scalar",        [&]() { return accel.mul_scalar(A, 2.0f); }, ELEM_ITERS, ELEM_BATCH, 1.0);
+            run_batched("Elementwise Add",   [&]() { return accel.ops().add(A, B); }, ELEM_ITERS, ELEM_BATCH, 1.0);
+            run_batched("Elementwise Mul",   [&]() { return accel.ops().mul(A, B); }, ELEM_ITERS, ELEM_BATCH, 1.0);
+            run_batched("Add Scalar",        [&]() { return accel.ops().add_scalar(A, 1.2345f); }, ELEM_ITERS, ELEM_BATCH, 1.0);
+            run_batched("Mul Scalar",        [&]() { return accel.ops().mul_scalar(A, 2.0f); }, ELEM_ITERS, ELEM_BATCH, 1.0);
         }
 
         // ---------- MATMUL (batched) ----------
@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
 
             // Warmup matmul a few times
             for (int i = 0; i < MAT_WARMUP; ++i) {
-                auto C = accel.matmul(A, B);
+                auto C = accel.ops().matmul(A, B);
                 C->download_data(sample.data(), sizeof(float) * sample_count, 0);
             }
 
@@ -227,9 +227,9 @@ int main(int argc, char** argv) {
                 auto t0 = Clock::now();
                 // batch MAT_BATCH matmuls and single sync
                 for (int b = 0; b < MAT_BATCH; ++b) {
-                    (void)accel.matmul(A, B);
+                    (void)accel.ops().matmul(A, B);
                 }
-                auto Csync = accel.matmul(A, B);
+                auto Csync = accel.ops().matmul(A, B);
                 Csync->download_data(sample.data(), sizeof(float) * sample_count, 0);
                 auto t1 = Clock::now();
                 iter_secs.push_back(std::chrono::duration<Sec>(t1 - t0).count());

@@ -403,7 +403,7 @@ bool test_built_in_tensor_operations() {
         
         // Test element-wise operations
         TestLogger::log_info("Testing element-wise addition");
-        auto result_add = accel.add(tensor_a, tensor_b);
+        auto result_add = accel.ops().add(tensor_a, tensor_b);
         std::vector<float> result_data(size);
         result_add->download_data(result_data.data());
         
@@ -418,7 +418,7 @@ bool test_built_in_tensor_operations() {
         }
         
         TestLogger::log_info("Testing element-wise subtraction");
-        auto result_sub = accel.sub(tensor_a, tensor_b);
+        auto result_sub = accel.ops().sub(tensor_a, tensor_b);
         result_sub->download_data(result_data.data());
         
         bool sub_correct = true;
@@ -432,7 +432,7 @@ bool test_built_in_tensor_operations() {
         }
         
         TestLogger::log_info("Testing element-wise multiplication");
-        auto result_mul = accel.mul(tensor_a, tensor_b);
+        auto result_mul = accel.ops().mul(tensor_a, tensor_b);
         result_mul->download_data(result_data.data());
         
         bool mul_correct = true;
@@ -446,8 +446,8 @@ bool test_built_in_tensor_operations() {
         }
         
         TestLogger::log_info("Testing scalar operations");
-        auto result_add_scalar = accel.add_scalar(tensor_a, 5.0f);
-        auto result_mul_scalar = accel.mul_scalar(tensor_a, 2.5f);
+        auto result_add_scalar = accel.ops().add_scalar(tensor_a, 5.0f);
+        auto result_mul_scalar = accel.ops().mul_scalar(tensor_a, 2.5f);
         
         result_add_scalar->download_data(result_data.data());
         bool add_scalar_correct = true;
@@ -472,7 +472,7 @@ bool test_built_in_tensor_operations() {
         TestLogger::log_info("Testing ReLU activation");
         std::vector<float> relu_data = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
         auto relu_tensor = accel.create_tensor(relu_data.data(), {5}, DataType::F32);
-        auto relu_result = accel.relu(relu_tensor);
+        auto relu_result = accel.ops().relu(relu_tensor);
         
         std::vector<float> relu_output(5);
         relu_result->download_data(relu_output.data());
@@ -529,7 +529,7 @@ bool test_matrix_operations() {
                            std::to_string(K) + ") x (" + std::to_string(K) + "x" + 
                            std::to_string(N) + ")");
         
-        auto matmul_result = accel.matmul(tensor_a, tensor_b);
+        auto matmul_result = accel.ops().matmul(tensor_a, tensor_b);
         
         std::vector<float> result_data(M * N);
         matmul_result->download_data(result_data.data());
@@ -553,7 +553,7 @@ bool test_matrix_operations() {
         
         // Test transpose
         TestLogger::log_info("Testing matrix transpose");
-        auto transpose_result = accel.transpose(tensor_a);
+        auto transpose_result = accel.ops().transpose(tensor_a);
         
         std::vector<float> transpose_data(K * M);
         transpose_result->download_data(transpose_data.data());
@@ -729,7 +729,7 @@ bool test_memory_and_performance() {
             auto start = std::chrono::high_resolution_clock::now();
             const int iters = 100;
             for (int i = 0; i < iters; ++i) {
-                auto c = accel.add(a, b);
+                auto c = accel.ops().add(a, b);
             }
             auto end = std::chrono::high_resolution_clock::now();
             double ms = std::chrono::duration<double, std::milli>(end - start).count();
@@ -752,7 +752,7 @@ bool test_memory_and_performance() {
                              std::to_string(N) + ")");
 
         auto start_mm = std::chrono::high_resolution_clock::now();
-        auto matC = accel.matmul(matA, matB);
+        auto matC = accel.ops().matmul(matA, matB);
         auto end_mm = std::chrono::high_resolution_clock::now();
         double ms_mm = std::chrono::duration<double, std::milli>(end_mm - start_mm).count();
 
@@ -798,7 +798,7 @@ bool test_error_handling() {
             auto tensor_a = accel.create_tensor({100}, DataType::F32);
             auto tensor_b = accel.create_tensor({200}, DataType::F32);
             
-            auto result = accel.add(tensor_a, tensor_b);
+            auto result = accel.ops().add(tensor_a, tensor_b);
             if (result) {
                 TestLogger::log_error("Expected tensor addition to fail with mismatched shapes");
                 all_handled = false;
