@@ -610,7 +610,7 @@ static void fetch_api_version(VulkanContext& ctx) {
     ctx.api_patch = VK_VERSION_PATCH(api_version);
 }
 
-static std::vector<const char*> get_required_extensions()
+static std::vector<const char*> get_required_extensions(b8 validation_enabled)
 {
     std::vector<const char*> extensions;
     
@@ -619,9 +619,8 @@ static std::vector<const char*> get_required_extensions()
     extensions.emplace_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
     #endif
     
-    #ifdef QS_DEBUG 
-    extensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
-    #endif
+    if (validation_enabled)
+        extensions.emplace_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     
     return extensions;
 }
@@ -677,7 +676,7 @@ static b8 create_instance(const std::string& name, VulkanContext& ctx) {
     app_info.engineVersion = VK_MAKE_API_VERSION(0, 1, 3, 0);
     app_info.apiVersion = VK_MAKE_API_VERSION(0, ctx.api_major, ctx.api_minor, ctx.api_patch);
 
-    auto extensions = get_required_extensions();
+    auto extensions = get_required_extensions(ctx.validation_enabled);
 
     VkInstanceCreateInfo create_info = {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
     create_info.pApplicationInfo = &app_info;

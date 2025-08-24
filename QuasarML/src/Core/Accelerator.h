@@ -48,10 +48,11 @@ constexpr u32 get_dtype_size(DataType dtype) {
 }
 
 /**
- * @brief Get string representation of data type
+ * @brief Get GLSL type name for a data type
  * @param dtype Data type to convert
- * @return String name of the data type
+ * @return GLSL type string
  */
+const char* dtype_to_glsl_type(DataType dtype);
 const char* dtype_to_string(DataType dtype);
 
 /**
@@ -141,10 +142,10 @@ public:
      * @param device_only If true, tensor resides only on GPU (default: false)
      * @return Shared pointer to the created tensor
      */
-    std::shared_ptr<Tensor> create_tensor_from_data(const void* data,
-                                                    const std::vector<u32>& shape,
-                                                    DataType dtype = DataType::F32,
-                                                    bool device_only = false);
+    std::shared_ptr<Tensor> create_tensor(const void* data,
+                                            const std::vector<u32>& shape,
+                                            DataType dtype = DataType::F32,
+                                            bool device_only = false);
 
     // ============================================================================
     // EXECUTION MANAGEMENT
@@ -181,11 +182,11 @@ public:
      * @param push_data Pointer to push constant data (default: nullptr)
      */
     void record_execution(std::shared_ptr<Kernel> kernel,
-                         const std::vector<std::shared_ptr<Tensor>>& tensors,
-                         u32 dispatch_x,
-                         u32 dispatch_y = 1,
-                         u32 dispatch_z = 1,
-                         const void* push_data = nullptr);
+                            const std::vector<std::shared_ptr<Tensor>>& tensors,
+                            u32 dispatch_x,
+                            u32 dispatch_y = 1,
+                            u32 dispatch_z = 1,
+                            const void* push_data = nullptr);
     
     /**
      * @brief End recording and execute all recorded commands
@@ -206,101 +207,16 @@ public:
     // TENSOR OPERATIONS
     // ============================================================================
 
-    /**
-     * @brief Element-wise addition: result = a + b
-     * @param a First input tensor
-     * @param b Second input tensor
-     * @param result Output tensor (must have compatible shape)
-     */
-    void tensor_add(std::shared_ptr<Tensor> a, 
-                    std::shared_ptr<Tensor> b, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Element-wise subtraction: result = a - b
-     * @param a First input tensor
-     * @param b Second input tensor
-     * @param result Output tensor (must have compatible shape)
-     */
-    void tensor_sub(std::shared_ptr<Tensor> a, 
-                    std::shared_ptr<Tensor> b, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Element-wise multiplication: result = a * b
-     * @param a First input tensor
-     * @param b Second input tensor
-     * @param result Output tensor (must have compatible shape)
-     */
-    void tensor_mul(std::shared_ptr<Tensor> a, 
-                    std::shared_ptr<Tensor> b, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Element-wise division: result = a / b
-     * @param a First input tensor
-     * @param b Second input tensor
-     * @param result Output tensor (must have compatible shape)
-     */
-    void tensor_div(std::shared_ptr<Tensor> a, 
-                    std::shared_ptr<Tensor> b, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Scalar addition: result = tensor + scalar
-     * @param tensor Input tensor
-     * @param scalar Scalar value to add
-     * @param result Output tensor (must have same shape as input)
-     */
-    void tensor_add_scalar(std::shared_ptr<Tensor> tensor, 
-                        float scalar, 
-                        std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Scalar multiplication: result = tensor * scalar
-     * @param tensor Input tensor
-     * @param scalar Scalar value to multiply
-     * @param result Output tensor (must have same shape as input)
-     */
-    void tensor_mul_scalar(std::shared_ptr<Tensor> tensor, 
-                        float scalar, 
-                        std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Apply ReLU activation: result = max(0, tensor)
-     * @param tensor Input tensor
-     * @param result Output tensor (must have same shape as input)
-     */
-    void tensor_relu(std::shared_ptr<Tensor> tensor, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Matrix multiplication: result = a @ b
-     * @param a First input tensor (2D matrix)
-     * @param b Second input tensor (2D matrix)
-     * @param result Output tensor (2D matrix with shape [a.rows, b.cols])
-     */
-    void tensor_matmul(std::shared_ptr<Tensor> a, 
-                    std::shared_ptr<Tensor> b, 
-                    std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Transpose 2D tensor: result = tensor^T
-     * @param tensor Input tensor (2D matrix)
-     * @param result Output tensor (2D matrix with transposed dimensions)
-     */
-    void tensor_transpose(std::shared_ptr<Tensor> tensor, 
-                        std::shared_ptr<Tensor> result);
-
-    /**
-     * @brief Sum reduction along specified axis
-     * @param tensor Input tensor
-     * @param result Output tensor (reduced along specified axis)
-     * @param axis Axis to reduce along (0 for rows, 1 for columns in 2D)
-     */
-    void tensor_sum_axis(std::shared_ptr<Tensor> tensor, 
-                        std::shared_ptr<Tensor> result, 
-                        u32 axis);
+    std::shared_ptr<Tensor> add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    std::shared_ptr<Tensor> sub(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    std::shared_ptr<Tensor> mul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    std::shared_ptr<Tensor> div(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    std::shared_ptr<Tensor> add_scalar(std::shared_ptr<Tensor> tensor, float scalar);
+    std::shared_ptr<Tensor> mul_scalar(std::shared_ptr<Tensor> tensor, float scalar);
+    std::shared_ptr<Tensor> relu(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    std::shared_ptr<Tensor> transpose(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> sum_axis(std::shared_ptr<Tensor> tensor, u32 axis);
 
     // ============================================================================
     // UTILITY METHODS
@@ -345,13 +261,20 @@ private:
                                         std::shared_ptr<Kernel> kernel) const;
     
     // Internal helper methods for tensor operations
-    void validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, 
-                                        std::shared_ptr<Tensor> b, 
-                                        std::shared_ptr<Tensor> result) const;
     void validate_tensor_shape_2d(std::shared_ptr<Tensor> tensor) const;
     std::shared_ptr<Kernel> get_or_create_kernel(const std::string& name, 
                                                 const std::string& glsl_source, 
                                                 u32 num_tensors, u32 push_constant_size = 0);
+    void validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) const;
+    
+    std::string generate_elementwise_kernel_source(const std::string& operation, 
+                                                    DataType dtype, 
+                                                    bool is_scalar = false) const;
+    std::string generate_matmul_kernel_source(DataType dtype) const;
+    std::string generate_transpose_kernel_source(DataType dtype) const;
+    std::string generate_sum_axis_kernel_source(DataType dtype) const;
+    std::string generate_relu_kernel_source(DataType dtype) const;
+    std::string get_kernel_name_for_dtype(const std::string& base_name, DataType dtype) const;
 };
 
 } // namespace QuasarML
