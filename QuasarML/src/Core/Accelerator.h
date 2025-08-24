@@ -1,6 +1,7 @@
 #pragma once
 
 #include <qspch.h>
+#include "DataTypes.h"
 #include <VulkanBackend/VulkanBackend.h>
 #include <memory>
 #include <vector>
@@ -12,48 +13,6 @@ namespace QuasarML {
 // Forward declarations
 class Kernel;
 class Tensor;
-
-
-/**
- * @brief Supported data types for tensors
- */
-enum class DataType : u32 {
-    F32 = 0,    // 32-bit floating point
-    F16,        // 16-bit floating point
-    I32,          // 32-bit signed integer
-    I16,          // 16-bit signed integer
-    I8,           // 8-bit signed integer
-    U32,         // 32-bit unsigned integer
-    U16,         // 16-bit unsigned integer
-    U8           // 8-bit unsigned integer
-};
-
-/**
- * @brief Get size in bytes for a given data type
- * @param dtype Data type to query
- * @return Size in bytes
- */
-constexpr u32 get_dtype_size(DataType dtype) {
-    switch (dtype) {
-        case DataType::F32: return 4;
-        case DataType::F16: return 2;
-        case DataType::I32:   return 4;
-        case DataType::I16:   return 2;
-        case DataType::I8:    return 1;
-        case DataType::U32:  return 4;
-        case DataType::U16:  return 2;
-        case DataType::U8:   return 1;
-        default:                return 0;
-    }
-}
-
-/**
- * @brief Get GLSL type name for a data type
- * @param dtype Data type to convert
- * @return GLSL type string
- */
-const char* dtype_to_glsl_type(DataType dtype);
-const char* dtype_to_string(DataType dtype);
 
 /**
  * @brief High-level compute accelerator interface for ML operations
@@ -127,25 +86,25 @@ public:
      * @brief Create a tensor with specified shape and data type
      * @param shape Vector specifying tensor dimensions
      * @param dtype Data type of tensor elements
-     * @param device_only If true, tensor resides only on GPU (default: false)
+     * @param device_only If true, tensor resides only on GPU (default: true)
      * @return Shared pointer to the created tensor
      */
     std::shared_ptr<Tensor> create_tensor(const std::vector<u32>& shape,
                                         DataType dtype = DataType::F32,
-                                        bool device_only = false);
+                                        bool device_only = true);
     
     /**
      * @brief Create a tensor from existing data
      * @param data Pointer to source data
      * @param shape Vector specifying tensor dimensions  
      * @param dtype Data type of tensor elements
-     * @param device_only If true, tensor resides only on GPU (default: false)
+     * @param device_only If true, tensor resides only on GPU (default: true)
      * @return Shared pointer to the created tensor
      */
     std::shared_ptr<Tensor> create_tensor(const void* data,
                                             const std::vector<u32>& shape,
                                             DataType dtype = DataType::F32,
-                                            bool device_only = false);
+                                            bool device_only = true);
 
     // ============================================================================
     // EXECUTION MANAGEMENT

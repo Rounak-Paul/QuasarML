@@ -58,19 +58,21 @@ class VulkanBackend {
         VkPipelineLayout layout = VK_NULL_HANDLE;
         VkDescriptorSetLayout descriptor_layout = VK_NULL_HANDLE;
         VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
-        VkDescriptorSet descriptor_set = VK_NULL_HANDLE;
         u32 binding_count = 0;
         
         bool is_valid() const { return pipeline != VK_NULL_HANDLE; }
+    };
+
+    struct DescriptorSetFrame {
+        std::vector<VkDescriptorSet> available_sets;
+        std::vector<VkDescriptorSet> used_sets;
+        size_t current_set_index = 0;
     };
     
     // Create compute pipeline from GLSL source
     ComputePipeline create_compute_pipeline(const std::string& glsl_source, 
                                             u32 num_storage_buffers,
                                             u32 push_constant_size = 0);
-    
-    // Bind buffer to pipeline binding point
-    void bind_buffer_to_pipeline(ComputePipeline& pipeline, u32 binding, Buffer& buffer);
     
     // Destroy compute pipeline
     void destroy_compute_pipeline(ComputePipeline& pipeline);
@@ -81,14 +83,16 @@ class VulkanBackend {
     
     // Execute compute shader synchronously (one-shot execution)
     void execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y = 1, u32 group_z = 1, 
-                        const void* push_constants = nullptr, u32 push_constant_size = 0);
+                    const void* push_constants = nullptr, u32 push_constant_size = 0,
+                    const std::vector<Buffer*>& buffers = {});
     
     // Begin recording compute commands (for batched operations)
     void begin_compute_recording();
     
     // Record compute dispatch
     void record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y = 1, u32 group_z = 1,
-                                const void* push_constants = nullptr, u32 push_constant_size = 0);
+                            const void* push_constants = nullptr, u32 push_constant_size = 0,
+                            const std::vector<Buffer*>& buffers = {});
     
     // Submit and execute recorded commands
     void execute_recorded_commands();
@@ -132,6 +136,13 @@ class VulkanBackend {
     VkCommandPool _imm_command_pool;
     VkSampler _imm_sampler;
     VkDescriptorPool _immui_pool;
+
+    static constexpr u32 MAX_FRAMES_IN_FLIGHT = 2;
+    std::array<DescriptorSetFrame, MAX_FRAMES_IN_FLIGHT> _descriptor_frames;
+    u32 _current_frame = 0;
+
+    VkDescriptorSet allocate_descriptor_set(ComputePipeline& pipeline);
+    void reset_descriptor_sets();
 
     b8 create_command_buffers();
     b8 create_sync_objects();

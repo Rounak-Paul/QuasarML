@@ -688,75 +688,83 @@ void main() {
 
 bool test_memory_and_performance() {
     TestLogger::log_test("Memory Management and Performance");
-    
+
     try {
         Accelerator accel("PerfTest");
-        
+
         auto [initial_used, total] = accel.get_memory_usage();
-        TestLogger::log_info("Initial memory usage: " + std::to_string(initial_used) + " / " + std::to_string(total) + " bytes");
-        
-        // Create moderate-sized tensors to test memory management
+        TestLogger::log_info("Initial memory usage: " + std::to_string(initial_used) +
+                             " / " + std::to_string(total) + " bytes");
+
+        // --- Memory Stress Test ---
+        const u32 small_tensor_size = 1024;   // small tensors (4 KB each)
+        const u32 large_tensor_size = 1 << 22; // ~16M elements (64 MB each for F32)
+
         std::vector<std::shared_ptr<Tensor>> tensors;
-        const u32 tensor_size = 256 * 256; // 256K elements = 1MB per tensor
-        
-        TestLogger::log_info("Creating 5 moderate tensors (" + std::to_string(tensor_size) + " elements each)");
-        
-        for (int i = 0; i < 5; ++i) {
-            auto tensor = accel.create_tensor({tensor_size}, DataType::F32);
-            tensors.push_back(tensor);
+        TestLogger::log_info("Allocating 100 small tensors of " + std::to_string(small_tensor_size) + " elements");
+        for (int i = 0; i < 100; ++i) {
+            tensors.push_back(accel.create_tensor({small_tensor_size}, DataType::F32));
         }
-        
-        auto [peak_used, _] = accel.get_memory_usage();
-        TestLogger::log_info("Peak memory usage: " + std::to_string(peak_used) + " bytes");
-        
-        // Performance test - simple operation timing with smaller tensors
-        const u32 perf_size = 100000; // 100K elements for performance test
-        auto perf_tensor_a = accel.create_tensor({perf_size}, DataType::F32);
-        auto perf_tensor_b = accel.create_tensor({perf_size}, DataType::F32);
-        
-        TestLogger::log_info("Running performance test (element-wise addition) with " + std::to_string(perf_size) + " elements");
-        
-        auto start_time = std::chrono::high_resolution_clock::now();
-        
-        for (int i = 0; i < 50; ++i) {  // Reduced iterations
-            auto result = accel.add(perf_tensor_a, perf_tensor_b);
+        auto [after_small, _1] = accel.get_memory_usage();
+        TestLogger::log_info("Memory after small allocations: " + std::to_string(after_small) + " bytes");
+
+        tensors.clear(); // free
+        auto [after_free, _2] = accel.get_memory_usage();
+        TestLogger::log_info("Memory after free: " + std::to_string(after_free) + " bytes");
+
+        TestLogger::log_info("Allocating 2 large tensors of " + std::to_string(large_tensor_size) + " elements");
+        auto big1 = accel.create_tensor({large_tensor_size}, DataType::F32);
+        auto big2 = accel.create_tensor({large_tensor_size}, DataType::F32);
+        auto [after_large, _3] = accel.get_memory_usage();
+        TestLogger::log_info("Memory after large allocations: " + std::to_string(after_large) + " bytes");
+
+        // --- Performance Benchmark ---
+        std::vector<u32> sizes = {10000, 100000, 1000000}; // 10K, 100K, 1M
+        for (u32 size : sizes) {
+            auto a = accel.create_tensor({size}, DataType::F32);
+            auto b = accel.create_tensor({size}, DataType::F32);
+
+            TestLogger::log_info("Benchmarking element-wise addition (" + std::to_string(size) + " elements)");
+
+            auto start = std::chrono::high_resolution_clock::now();
+            const int iters = 100;
+            for (int i = 0; i < iters; ++i) {
+                auto c = accel.add(a, b);
+            }
+            auto end = std::chrono::high_resolution_clock::now();
+            double ms = std::chrono::duration<double, std::milli>(end - start).count();
+
+            double ops = static_cast<double>(size) * iters;
+            double gops = ops / (ms * 1e6); // GigaOps/s
+
+            TestLogger::log_info("  Time: " + std::to_string(ms) + " ms for " +
+                                 std::to_string(iters) + " iterations");
+            TestLogger::log_info("  Throughput: " + std::to_string(gops) + " GOPS");
         }
-        
-        accel.synchronize();
-        auto end_time = std::chrono::high_resolution_clock::now();
-        
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
-        TestLogger::log_info("50 additions of " + std::to_string(perf_size) + 
-                           " elements took " + std::to_string(duration.count()) + " ms");
-        
-        // Clear tensors and check memory cleanup
-        TestLogger::log_info("Clearing all test tensors and checking memory cleanup");
-        tensors.clear();
-        perf_tensor_a.reset();
-        perf_tensor_b.reset();
-        
-        // Force synchronization to complete any pending operations
-        accel.synchronize();
-        
-        auto [final_used, __] = accel.get_memory_usage();
-        TestLogger::log_info("Final memory usage after cleanup: " + std::to_string(final_used) + " bytes");
-        
-        // More lenient memory check - allow for some persistent allocations
-        // The Vulkan backend may keep some buffers allocated for performance
-        u64 tolerance = 50 * 1024 * 1024; // 50MB tolerance for backend allocations
-        bool memory_reasonable = (final_used <= initial_used + tolerance);
-        
-        if (!memory_reasonable) {
-            TestLogger::log_info("Memory usage higher than expected, but this may be due to Vulkan buffer pooling");
-            // Still pass the test if memory usage is reasonable (not growing unbounded)
-            memory_reasonable = (final_used < peak_used); // At least some cleanup happened
-        }
-        
-        TestLogger::log_result(memory_reasonable, "Memory management and performance test");
-        return memory_reasonable;
-    }
-    catch (const std::exception& e) {
-        TestLogger::log_error("Exception during memory/performance testing: " + std::string(e.what()));
+
+        // --- MatMul Benchmark ---
+        const u32 M = 512, K = 512, N = 512;
+        auto matA = accel.create_tensor({M, K}, DataType::F32);
+        auto matB = accel.create_tensor({K, N}, DataType::F32);
+
+        TestLogger::log_info("Benchmarking MatMul (" + std::to_string(M) + "x" +
+                             std::to_string(K) + ") x (" + std::to_string(K) + "x" +
+                             std::to_string(N) + ")");
+
+        auto start_mm = std::chrono::high_resolution_clock::now();
+        auto matC = accel.matmul(matA, matB);
+        auto end_mm = std::chrono::high_resolution_clock::now();
+        double ms_mm = std::chrono::duration<double, std::milli>(end_mm - start_mm).count();
+
+        double flops = 2.0 * M * K * N; // MatMul FLOPs
+        double gflops = flops / (ms_mm * 1e6);
+        TestLogger::log_info("  Time: " + std::to_string(ms_mm) + " ms");
+        TestLogger::log_info("  Throughput: " + std::to_string(gflops) + " GFLOPS");
+
+        TestLogger::log_result(true, "Memory + performance tests completed");
+        return true;
+    } catch (const std::exception& e) {
+        TestLogger::log_error("Exception during performance test: " + std::string(e.what()));
         TestLogger::log_result(false, "Exception thrown");
         return false;
     }

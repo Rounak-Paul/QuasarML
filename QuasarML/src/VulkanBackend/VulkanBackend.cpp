@@ -280,8 +280,8 @@ void VulkanBackend::copy_buffer(Buffer& src, Buffer& dst, VkDeviceSize size, VkD
 }
 
 VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std::string& glsl_source, 
-                                                                             u32 num_storage_buffers,
-                                                                             u32 push_constant_size) {
+                                                                     u32 num_storage_buffers,
+                                                                     u32 push_constant_size) {
     ComputePipeline pipeline = {};
     pipeline.binding_count = num_storage_buffers;
     
@@ -303,30 +303,23 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
     VK_CHECK(vkCreateDescriptorSetLayout(_ctx.device.logical_device, &layout_info, 
                                         nullptr, &pipeline.descriptor_layout));
     
-    // Create descriptor pool
+    // Create a larger descriptor pool to handle multiple allocations
     VkDescriptorPoolSize pool_size = {};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = num_storage_buffers;
+    pool_size.descriptorCount = num_storage_buffers * 100; // Allow for 100 concurrent descriptor sets
     
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    pool_info.maxSets = 1;
+    pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | 
+                      VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+    pool_info.maxSets = 100; // Allow 100 concurrent descriptor sets
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
     
     VK_CHECK(vkCreateDescriptorPool(_ctx.device.logical_device, &pool_info, 
                                    nullptr, &pipeline.descriptor_pool));
     
-    // Allocate descriptor set
-    VkDescriptorSetAllocateInfo alloc_info = {};
-    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    alloc_info.descriptorPool = pipeline.descriptor_pool;
-    alloc_info.descriptorSetCount = 1;
-    alloc_info.pSetLayouts = &pipeline.descriptor_layout;
-    
-    VK_CHECK(vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, 
-                                     &pipeline.descriptor_set));
+    // Don't allocate descriptor set here anymore - do it per-use
     
     // Create pipeline layout with push constants if needed
     VkPushConstantRange push_constant_range = {};
@@ -346,7 +339,7 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
     VK_CHECK(vkCreatePipelineLayout(_ctx.device.logical_device, &pipeline_layout_info, 
                                    nullptr, &pipeline.layout));
     
-    // Use your existing shader compilation from game engine
+    // Shader module and pipeline creation remains the same...
     VkShaderModule shader_module;
     if (!load_compute_shader_module(glsl_source, _ctx.device.logical_device, &shader_module)) {
         LOG_ERROR("Failed to create compute shader module");
@@ -354,7 +347,6 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
         return {};
     }
     
-    // Create compute pipeline
     VkPipelineShaderStageCreateInfo stage_info = {};
     stage_info.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     stage_info.stage = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -367,29 +359,100 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
     pipeline_info.layout = pipeline.layout;
     
     VK_CHECK(vkCreateComputePipelines(_ctx.device.logical_device, VK_NULL_HANDLE, 1, 
-                                     &pipeline_info, nullptr, &pipeline.pipeline));
+                                        &pipeline_info, nullptr, &pipeline.pipeline));
     
     vkDestroyShaderModule(_ctx.device.logical_device, shader_module, nullptr);
     
     return pipeline;
 }
 
-void VulkanBackend::bind_buffer_to_pipeline(ComputePipeline& pipeline, u32 binding, Buffer& buffer) {
-    VkDescriptorBufferInfo buffer_info = {};
-    buffer_info.buffer = buffer.buffer;
-    buffer_info.offset = 0;
-    buffer_info.range = buffer.size;
+VkDescriptorSet VulkanBackend::allocate_descriptor_set(ComputePipeline& pipeline) {
+    VkDescriptorSetAllocateInfo alloc_info = {};
+    alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc_info.descriptorPool = pipeline.descriptor_pool;
+    alloc_info.descriptorSetCount = 1;
+    alloc_info.pSetLayouts = &pipeline.descriptor_layout;
     
-    VkWriteDescriptorSet write = {};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = pipeline.descriptor_set;
-    write.dstBinding = binding;
-    write.dstArrayElement = 0;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.descriptorCount = 1;
-    write.pBufferInfo = &buffer_info;
+    VkDescriptorSet descriptor_set;
+    VkResult result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
     
-    vkUpdateDescriptorSets(_ctx.device.logical_device, 1, &write, 0, nullptr);
+    if (result != VK_SUCCESS) {
+        // If allocation fails, reset the pool and try again
+        vkResetDescriptorPool(_ctx.device.logical_device, pipeline.descriptor_pool, 0);
+        result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
+        VK_CHECK(result);
+    }
+    
+    return descriptor_set;
+}
+
+void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z, 
+                                   const void* push_constants, u32 push_constant_size,
+                                   const std::vector<Buffer*>& buffers) {
+    begin_compute_recording();
+    record_compute_dispatch(pipeline, group_x, group_y, group_z, push_constants, push_constant_size, buffers);
+    execute_recorded_commands();
+    wait_for_compute();
+}
+
+void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
+                                           const void* push_constants, u32 push_constant_size,
+                                           const std::vector<Buffer*>& buffers) {
+    if (!_recording) {
+        LOG_ERROR("Must call begin_compute_recording() first");
+        return;
+    }
+    
+    // Allocate a fresh descriptor set for this dispatch
+    VkDescriptorSet descriptor_set = allocate_descriptor_set(pipeline);
+    
+    // Update the descriptor set with the provided buffers
+    if (!buffers.empty()) {
+        std::vector<VkDescriptorBufferInfo> buffer_infos(buffers.size());
+        std::vector<VkWriteDescriptorSet> writes(buffers.size());
+        
+        for (size_t i = 0; i < buffers.size(); ++i) {
+            buffer_infos[i].buffer = buffers[i]->buffer;
+            buffer_infos[i].offset = 0;
+            buffer_infos[i].range = buffers[i]->size;
+            
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = descriptor_set;
+            writes[i].dstBinding = static_cast<u32>(i);
+            writes[i].dstArrayElement = 0;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].descriptorCount = 1;
+            writes[i].pBufferInfo = &buffer_infos[i];
+        }
+        
+        vkUpdateDescriptorSets(_ctx.device.logical_device, static_cast<u32>(writes.size()), 
+                              writes.data(), 0, nullptr);
+    }
+    
+    vkCmdBindPipeline(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline.layout, 0, 1, &descriptor_set, 0, nullptr);
+    
+    if (push_constants && push_constant_size > 0) {
+        vkCmdPushConstants(_compute_command_buffer, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 
+                          0, push_constant_size, push_constants);
+    }
+    
+    vkCmdDispatch(_compute_command_buffer, group_x, group_y, group_z);
+}
+
+void VulkanBackend::begin_compute_recording() {
+    // Reset descriptor pools at the beginning of each frame
+    _current_frame = (_current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
+    
+    VK_CHECK(vkResetCommandBuffer(_compute_command_buffer, 0));
+    
+    VkCommandBufferBeginInfo begin_info = {};
+    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    
+    VK_CHECK(vkBeginCommandBuffer(_compute_command_buffer, &begin_info));
+    _recording = true;
 }
 
 void VulkanBackend::destroy_compute_pipeline(ComputePipeline& pipeline) {
@@ -406,44 +469,6 @@ void VulkanBackend::destroy_compute_pipeline(ComputePipeline& pipeline) {
         vkDestroyDescriptorSetLayout(_ctx.device.logical_device, pipeline.descriptor_layout, nullptr);
     }
     pipeline = {};
-}
-
-void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z, 
-                                       const void* push_constants, u32 push_constant_size) {
-    begin_compute_recording();
-    record_compute_dispatch(pipeline, group_x, group_y, group_z, push_constants, push_constant_size);
-    execute_recorded_commands();
-    wait_for_compute();
-}
-
-void VulkanBackend::begin_compute_recording() {
-    VK_CHECK(vkResetCommandBuffer(_compute_command_buffer, 0));
-    
-    VkCommandBufferBeginInfo begin_info = {};
-    begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    
-    VK_CHECK(vkBeginCommandBuffer(_compute_command_buffer, &begin_info));
-    _recording = true;
-}
-
-void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
-                                               const void* push_constants, u32 push_constant_size) {
-    if (!_recording) {
-        LOG_ERROR("Must call begin_compute_recording() first");
-        return;
-    }
-    
-    vkCmdBindPipeline(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vkCmdBindDescriptorSets(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
-                           pipeline.layout, 0, 1, &pipeline.descriptor_set, 0, nullptr);
-    
-    if (push_constants && push_constant_size > 0) {
-        vkCmdPushConstants(_compute_command_buffer, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 
-                          0, push_constant_size, push_constants);
-    }
-    
-    vkCmdDispatch(_compute_command_buffer, group_x, group_y, group_z);
 }
 
 void VulkanBackend::execute_recorded_commands() {
