@@ -9,6 +9,37 @@ endif()
 
 project(QuasarML)
 
+# Performance build defaults and options
+option(QS_ENABLE_FAST_MATH "Enable -ffast-math for math optimizations (may change numerical results)" OFF)
+option(QS_ENABLE_PGO "Enable Profile-Guided Optimization helper flags (requires manual run steps)" OFF)
+
+# Ensure a sensible default when not specified by caller
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
+
+# Configure sensible Release flags per compiler and enable IPO/LTO when available
+include(CheckIPOSupported)
+check_ipo_supported(RESULT _ipo_supported OUTPUT _ipo_output)
+if(_ipo_supported)
+    message(STATUS "IPO / LTO supported: enabling interprocedural optimization for Release builds")
+    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+else()
+    message(STATUS "IPO / LTO not supported: ${_ipo_output}")
+endif()
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+    set(_release_common_flags "-O3 -DNDEBUG -march=native")
+    if(QS_ENABLE_FAST_MATH)
+        set(_release_common_flags "${_release_common_flags} -ffast-math")
+    endif()
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} ${_release_common_flags}")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} ${_release_common_flags}")
+elseif(MSVC)
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /DNDEBUG /GL")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /O2 /DNDEBUG /GL")
+endif()
+
 # Debug Mode -----------------------------------------------
 add_compile_definitions($<$<CONFIG:Debug>:QS_DEBUG>)
 # ----------------------------------------------------------

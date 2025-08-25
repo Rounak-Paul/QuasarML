@@ -30,7 +30,8 @@ private:
     
     struct FCLayer {
         std::shared_ptr<Tensor> weights;    // [out_features, in_features]
-        std::shared_ptr<Tensor> bias;       // [out_features]
+    std::shared_ptr<Tensor> bias;       // [1, out_features] (row vector for easy matmul output add)
+    std::shared_ptr<Tensor> weights_t;  // cached transpose [in_features, out_features]
         u32 in_features, out_features;
         std::string name;
     };
@@ -283,8 +284,11 @@ void main() {
             b = 0.01f;
         }
         
-        layer.weights = accel.create_tensor(weights.data(), {out_features, in_features}, DataType::F32);
-        layer.bias = accel.create_tensor(bias.data(), {out_features}, DataType::F32);
+    layer.weights = accel.create_tensor(weights.data(), {out_features, in_features}, DataType::F32);
+    // Cache transposed weights as [in_features, out_features] to avoid doing this each inference
+    layer.weights_t = accel.ops().transpose(layer.weights);
+    // Store bias as a 2D row tensor [1, out_features] so it can be added to matmul output [1, out_features]
+    layer.bias = accel.create_tensor(bias.data(), {1, out_features}, DataType::F32);
         
         return layer;
     }
@@ -353,13 +357,12 @@ void main() {
     }
     
     std::shared_ptr<Tensor> fc_forward(std::shared_ptr<Tensor> input, const FCLayer& layer) {
-        // For matrix multiplication: input [1, in_features] @ weights [in_features, out_features]
-        // But our weights are stored as [out_features, in_features], so we need to transpose
-        auto weights_t = accel.ops().transpose(layer.weights);  // Now [in_features, out_features]
-        auto output = accel.ops().matmul(input, weights_t);
+    // For matrix multiplication: input [1, in_features] @ weights_t [in_features, out_features]
+    // Use cached transposed weights to avoid repeated transpose overhead
+    auto output = accel.ops().matmul(input, layer.weights_t);
         
-        // Add bias (broadcast addition)
-        output = accel.ops().add(output, layer.bias);
+    // Add bias: layer.bias is stored as [1, out_features], matching output shape [1, out_features]
+    output = accel.ops().add(output, layer.bias);
         
         return output;
     }
@@ -448,10 +451,9 @@ void main() {
         u32 flattened_size = h * w * 64;
         auto flattened = flatten_forward(pool2_out, flattened_size);
         
-        // Create proper 2D tensor for matrix multiplication [1, flattened_size]
-        std::vector<float> temp_data(flattened_size);
-        flattened->download_data(temp_data.data());
-        auto reshaped_input = accel.create_tensor(temp_data.data(), {1, flattened_size}, DataType::F32);
+    // Reshape flattened tensor in-place to [1, flattened_size] to avoid CPU round-trip
+    flattened->reshape({1, flattened_size});
+    auto reshaped_input = flattened;
         
         // FC1 + ReLU
         log_info("  Layer 6: Fully Connected 3136->128");
@@ -498,6 +500,135 @@ void main() {
                  << " (confidence: " << std::fixed << std::setprecision(2) 
                  << predictions[predicted_class] * 100 << "%)" << std::endl;
     }
+
+    // Train final and penultimate FC layers on a single generated sample using SGD with light augmentation
+    void train_on_sample(std::shared_ptr<Tensor> sample, int target_class,
+                         int epochs = 1000, float lr = 0.05f, int log_every = 100) {
+        log_section("Training (SGD on penultimate + final FC layers)");
+
+        auto& first = fc_layers[0];
+        auto& final = fc_layers[1];
+
+        u32 out1 = first.out_features; // e.g. 128
+        u32 in1 = first.in_features;   // e.g. 3136
+        u32 out2 = final.out_features; // e.g. 10
+        u32 in2 = final.in_features;   // should equal out1
+
+        // One-hot label
+        std::vector<float> y_true(out2, 0.0f);
+        if (target_class >= 0 && target_class < (int)out2) y_true[target_class] = 1.0f;
+
+        // Host buffers
+        std::vector<float> W1((size_t)out1 * in1);
+        std::vector<float> b1(out1);
+        std::vector<float> W2((size_t)out2 * in2);
+        std::vector<float> b2(out2);
+        std::vector<float> input_host(in1);
+        std::vector<float> z1_host(out1);
+        std::vector<float> a1_host(out1);
+        std::vector<float> logits_host(out2);
+
+        for (int ep = 1; ep <= epochs; ++ep) {
+            // Augment sample slightly on CPU
+            std::vector<float> img_buf(28 * 28);
+            sample->download_data(img_buf.data());
+            for (auto &v : img_buf) v = std::min(1.0f, std::max(0.0f, v + (normal_dist(rng) * 0.025f)));
+            auto aug = accel.create_tensor(img_buf.data(), {28*28}, DataType::F32);
+
+            // Forward through conv/pool/flatten
+            u32 h = 28, w = 28;
+            auto c1 = conv2d_forward(aug, conv_layers[0], h, w, h, w);
+            c1 = accel.ops().relu(c1);
+            auto p1 = maxpool2d_forward(c1, h, w, conv_layers[0].out_channels, 2, 2, h, w);
+            auto c2 = conv2d_forward(p1, conv_layers[1], h, w, h, w);
+            c2 = accel.ops().relu(c2);
+            auto p2 = maxpool2d_forward(c2, h, w, conv_layers[1].out_channels, 2, 2, h, w);
+            u32 flat_size = h * w * conv_layers[1].out_channels;
+            auto flat = flatten_forward(p2, flat_size);
+            flat->reshape({1, flat_size});
+
+            // Forward through FC1 and FC2
+            auto z1 = fc_forward(flat, first); // linear
+            auto a1 = accel.ops().relu(z1);
+            auto logits = fc_forward(a1, final);
+
+            // Download necessary tensors
+            logits->download_data(logits_host.data());
+            z1->download_data(z1_host.data());
+            a1->download_data(a1_host.data());
+            flat->download_data(input_host.data());
+
+            // Softmax
+            float m = *std::max_element(logits_host.begin(), logits_host.end());
+            float s = 0.0f;
+            for (u32 i = 0; i < out2; ++i) { logits_host[i] = std::exp(logits_host[i] - m); s += logits_host[i]; }
+            for (u32 i = 0; i < out2; ++i) logits_host[i] /= s;
+
+            // Gradient wrt logits (probs - y)
+            std::vector<float> grad_logits(out2);
+            for (u32 i = 0; i < out2; ++i) grad_logits[i] = logits_host[i] - y_true[i];
+
+            // Download weights/bias
+            first.weights->download_data(W1.data());
+            first.bias->download_data(b1.data());
+            final.weights->download_data(W2.data());
+            final.bias->download_data(b2.data());
+
+            // Update W2, b2
+            for (u32 o = 0; o < out2; ++o) {
+                for (u32 i = 0; i < in2; ++i) {
+                    size_t idx = (size_t)o * in2 + i; // layout [out2, in2]
+                    float dW = grad_logits[o] * a1_host[i];
+                    W2[idx] -= lr * dW;
+                }
+                b2[o] -= lr * grad_logits[o];
+            }
+
+            // Backprop to a1: grad_a1 = W2^T * grad_logits
+            std::vector<float> grad_a1(in2, 0.0f);
+            for (u32 o = 0; o < out2; ++o) {
+                for (u32 i = 0; i < in2; ++i) {
+                    size_t idx = (size_t)o * in2 + i;
+                    grad_a1[i] += grad_logits[o] * W2[idx];
+                }
+            }
+
+            // grad_z1 = grad_a1 * (z1 > 0)
+            std::vector<float> grad_z1(out1);
+            for (u32 i = 0; i < out1; ++i) {
+                float mask = z1_host[i] > 0.0f ? 1.0f : 0.0f;
+                grad_z1[i] = grad_a1[i] * mask;
+            }
+
+            // Update W1, b1
+            for (u32 o = 0; o < out1; ++o) {
+                for (u32 i = 0; i < in1; ++i) {
+                    size_t idx = (size_t)o * in1 + i; // layout [out1, in1]
+                    float dW = grad_z1[o] * input_host[i];
+                    W1[idx] -= lr * dW;
+                }
+                b1[o] -= lr * grad_z1[o];
+            }
+
+            // Upload updates and refresh transposes
+            first.weights->upload_data(W1.data());
+            first.bias->upload_data(b1.data());
+            first.weights_t = accel.ops().transpose(first.weights);
+
+            final.weights->upload_data(W2.data());
+            final.bias->upload_data(b2.data());
+            final.weights_t = accel.ops().transpose(final.weights);
+
+            if ((ep % log_every) == 0 || ep == 1 || ep == epochs) {
+                // compute simple cross-entropy
+                float loss = 0.0f;
+                for (u32 i = 0; i < out2; ++i) if (y_true[i] > 0.0f) loss = -std::log(std::max(1e-8f, logits_host[i]));
+                log_info("Epoch " + std::to_string(ep) + ": loss=" + std::to_string(loss));
+            }
+        }
+
+        log_info("Training complete (updated two FC layers).");
+    }
     
     void benchmark_performance() {
         log_section("Performance Benchmarking");
@@ -538,6 +669,10 @@ void main() {
     
     void run_demo() {
         try {
+            // Train the final layer on one synthetic sample to improve inference demo
+            auto sample = generate_sample_input();
+            // assume target class 4 for the synthetic pattern
+            train_on_sample(sample, 4, 300, 0.05f, 50);
             run_inference();
             benchmark_performance();
             
