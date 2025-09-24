@@ -74,7 +74,7 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape
         throw std::runtime_error("Backend not initialized");
     }
     
-    auto tensor = std::make_shared<Tensor>(_backend.get(), shape, dtype, device_only);
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, device_only);
     
     _tensors.push_back(tensor);
     _allocated_memory += tensor->get_size_bytes();
@@ -98,7 +98,7 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const void* data,
         throw std::invalid_argument("Data pointer cannot be null");
     }
     
-    auto tensor = std::make_shared<Tensor>(_backend.get(), shape, dtype, device_only);
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, device_only);
     tensor->upload_data(data);
     
     _tensors.push_back(tensor);

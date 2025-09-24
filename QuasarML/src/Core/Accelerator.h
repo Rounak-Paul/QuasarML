@@ -83,6 +83,7 @@ public:
     TensorOperations& ops() { return _tensor_ops; }
     const TensorOperations& ops() const { return _tensor_ops; }
 
+
     // ============================================================================
     // UTILITY METHODS
     // ============================================================================

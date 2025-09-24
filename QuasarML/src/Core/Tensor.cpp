@@ -1,4 +1,5 @@
 #include "Tensor.h"
+#include "Accelerator.h"
 #include <sstream>
 #include <algorithm>
 #include <cstring>
@@ -6,11 +7,23 @@
 
 namespace QuasarML {
 
-Tensor::Tensor(VulkanBackend* backend,
+// Helper: check accelerator match
+void Tensor::check_accelerator_match(const std::shared_ptr<Tensor>& other) const {
+    if (!other) throw std::invalid_argument("Other tensor is null");
+    if (this->_accelerator == nullptr || other->get_accelerator() == nullptr)
+        throw std::runtime_error("Tensor missing owning Accelerator");
+    if (this->_accelerator != other->get_accelerator())
+        throw std::runtime_error("Tensors from different Accelerators cannot be used together");
+}
+
+
+Tensor::Tensor(Accelerator* accelerator,
+               VulkanBackend* backend,
                const std::vector<u32>& shape,
                DataType dtype,
                bool device_only)
-    : _backend(backend)
+    : _accelerator(accelerator)
+    , _backend(backend)
     , _shape(shape)
     , _dtype(dtype)
     , _device_only(device_only)
@@ -41,8 +54,10 @@ Tensor::Tensor(Tensor&& other) noexcept
     other._buffer = {};
 }
 
-Tensor::Tensor(VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only)
-    : _backend(backend)
+
+Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only)
+    : _accelerator(accelerator)
+    , _backend(backend)
     , _buffer(buffer)
     , _shape(shape)
     , _dtype(dtype)
@@ -244,7 +259,57 @@ void Tensor::validate_data_transfer(u64 size_bytes, u64 offset_bytes) const {
 }
 
 std::shared_ptr<Tensor> Tensor::create_view_with_shape(const std::vector<u32>& new_shape) const {
-    return std::make_shared<Tensor>(_backend, _buffer, new_shape, _dtype, _device_only);
+    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only);
+}
+// Operator overloads
+std::shared_ptr<Tensor> Tensor::operator+(const std::shared_ptr<Tensor>& other) const {
+    check_accelerator_match(other);
+    return _accelerator->ops().add(std::const_pointer_cast<Tensor>(shared_from_this()), other);
+}
+std::shared_ptr<Tensor> Tensor::operator-(const std::shared_ptr<Tensor>& other) const {
+    check_accelerator_match(other);
+    return _accelerator->ops().sub(std::const_pointer_cast<Tensor>(shared_from_this()), other);
+}
+std::shared_ptr<Tensor> Tensor::operator*(const std::shared_ptr<Tensor>& other) const {
+    check_accelerator_match(other);
+    return _accelerator->ops().mul(std::const_pointer_cast<Tensor>(shared_from_this()), other);
+}
+std::shared_ptr<Tensor> Tensor::operator/(const std::shared_ptr<Tensor>& other) const {
+    check_accelerator_match(other);
+    return _accelerator->ops().div(std::const_pointer_cast<Tensor>(shared_from_this()), other);
+}
+
+std::shared_ptr<Tensor> Tensor::operator+(float scalar) const {
+    return _accelerator->ops().add_scalar(std::const_pointer_cast<Tensor>(shared_from_this()), scalar);
+}
+std::shared_ptr<Tensor> Tensor::operator-(float scalar) const {
+    // Use add_scalar with -scalar
+    return _accelerator->ops().add_scalar(std::const_pointer_cast<Tensor>(shared_from_this()), -scalar);
+}
+std::shared_ptr<Tensor> Tensor::operator*(float scalar) const {
+    return _accelerator->ops().mul_scalar(std::const_pointer_cast<Tensor>(shared_from_this()), scalar);
+}
+std::shared_ptr<Tensor> Tensor::operator/(float scalar) const {
+    // Use mul_scalar with 1/scalar
+    if (scalar == 0.0f) throw std::invalid_argument("Division by zero");
+    return _accelerator->ops().mul_scalar(std::const_pointer_cast<Tensor>(shared_from_this()), 1.0f / scalar);
+}
+
+// Scalar left-hand side
+std::shared_ptr<Tensor> operator+(float scalar, const Tensor& tensor) {
+    return tensor._accelerator->ops().add_scalar(std::const_pointer_cast<Tensor>(tensor.shared_from_this()), scalar);
+}
+std::shared_ptr<Tensor> operator-(float scalar, const Tensor& tensor) {
+    // scalar - tensor: (scalar + (-1 * tensor))
+    auto neg = tensor._accelerator->ops().mul_scalar(std::const_pointer_cast<Tensor>(tensor.shared_from_this()), -1.0f);
+    return tensor._accelerator->ops().add_scalar(neg, scalar);
+}
+std::shared_ptr<Tensor> operator*(float scalar, const Tensor& tensor) {
+    return tensor._accelerator->ops().mul_scalar(std::const_pointer_cast<Tensor>(tensor.shared_from_this()), scalar);
+}
+std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor) {
+    // scalar / tensor: not mathematically defined for elementwise, but could be scalar * (1/tensor)
+    throw std::runtime_error("Elementwise scalar / tensor not supported");
 }
 
 void Tensor::cleanup_buffer() {

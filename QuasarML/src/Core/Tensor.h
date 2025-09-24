@@ -1,19 +1,27 @@
+
+
+// For shared_ptr<Tensor> operator overloads, include "TensorOps.h" after this header.
 #pragma once
 
 #include <qspch.h>
 #include "DataTypes.h"
 #include <VulkanBackend/VulkanBackend.h>
 #include <memory>
+
 #include <string>
 #include <vector>
 #include <numeric>   // for std::accumulate
 #include <functional> // for std::multiplies
+#include <memory>
+
 
 namespace QuasarML {
 
-class Tensor {
+class Accelerator; // Forward declaration
+class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
-    Tensor(VulkanBackend* backend,
+    Tensor(Accelerator* accelerator,
+           VulkanBackend* backend,
            const std::vector<u32>& shape,
            DataType dtype = DataType::F32,
            bool device_only = false);
@@ -61,13 +69,33 @@ public:
     VulkanBackend::Buffer& get_buffer() { return _buffer; }
     const VulkanBackend::Buffer& get_buffer() const { return _buffer; }
 
-    Tensor(VulkanBackend* backend,
-           VulkanBackend::Buffer buffer,
-           const std::vector<u32>& shape,
-           DataType dtype,
-           bool device_only);
+    Tensor(Accelerator* accelerator,
+        VulkanBackend* backend,
+        VulkanBackend::Buffer buffer,
+        const std::vector<u32>& shape,
+        DataType dtype,
+        bool device_only);
+    // Operator overloads for ergonomic usage
+    std::shared_ptr<Tensor> operator+(const std::shared_ptr<Tensor>& other) const;
+    std::shared_ptr<Tensor> operator-(const std::shared_ptr<Tensor>& other) const;
+    std::shared_ptr<Tensor> operator*(const std::shared_ptr<Tensor>& other) const;
+    std::shared_ptr<Tensor> operator/(const std::shared_ptr<Tensor>& other) const;
+
+    // Scalar overloads (right-hand side)
+    std::shared_ptr<Tensor> operator+(float scalar) const;
+    std::shared_ptr<Tensor> operator-(float scalar) const;
+    std::shared_ptr<Tensor> operator*(float scalar) const;
+    std::shared_ptr<Tensor> operator/(float scalar) const;
+
+    // Scalar overloads (left-hand side, friend)
+    friend std::shared_ptr<Tensor> operator+(float scalar, const Tensor& tensor);
+    friend std::shared_ptr<Tensor> operator-(float scalar, const Tensor& tensor);
+    friend std::shared_ptr<Tensor> operator*(float scalar, const Tensor& tensor);
+    friend std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor);
+    Accelerator* get_accelerator() const { return _accelerator; }
 
 private:
+    Accelerator* _accelerator;
     VulkanBackend* _backend;
     std::vector<u32> _shape;
     DataType _dtype;
@@ -77,6 +105,7 @@ private:
     bool _is_valid;
 
     void calculate_element_count();
+    void check_accelerator_match(const std::shared_ptr<Tensor>& other) const;
     void allocate_buffer();
     void validate_shape(const std::vector<u32>& shape) const;
     void validate_data_transfer(u64 size_bytes, u64 offset_bytes = 0) const;
