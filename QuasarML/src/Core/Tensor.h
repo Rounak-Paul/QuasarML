@@ -68,13 +68,24 @@ public:
 
     VulkanBackend::Buffer& get_buffer() { return _buffer; }
     const VulkanBackend::Buffer& get_buffer() const { return _buffer; }
+    // Element offset (in elements) for views into existing buffer
+    u64 get_element_offset() const { return _element_offset; }
 
     Tensor(Accelerator* accelerator,
         VulkanBackend* backend,
         VulkanBackend::Buffer buffer,
         const std::vector<u32>& shape,
         DataType dtype,
-        bool device_only);
+        bool device_only,
+        bool owns_buffer = true);
+    Tensor(Accelerator* accelerator,
+        VulkanBackend* backend,
+        VulkanBackend::Buffer buffer,
+        const std::vector<u32>& shape,
+        DataType dtype,
+        bool device_only,
+        u64 element_offset,
+        bool owns_buffer = true);
     // Operator overloads for ergonomic usage
     std::shared_ptr<Tensor> operator+(const std::shared_ptr<Tensor>& other) const;
     std::shared_ptr<Tensor> operator-(const std::shared_ptr<Tensor>& other) const;
@@ -94,6 +105,10 @@ public:
     friend std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor);
     Accelerator* get_accelerator() const { return _accelerator; }
 
+    // View creation helpers (public so TensorOperations can create zero-copy views)
+    std::shared_ptr<Tensor> create_view_with_shape(const std::vector<u32>& new_shape) const;
+    std::shared_ptr<Tensor> create_view_with_shape_and_offset(const std::vector<u32>& new_shape, u64 element_offset) const;
+
 private:
     Accelerator* _accelerator;
     VulkanBackend* _backend;
@@ -103,13 +118,14 @@ private:
     bool _device_only;
     VulkanBackend::Buffer _buffer;
     bool _is_valid;
+    u64 _element_offset = 0; // offset in elements into the buffer (for views)
+    bool _owns_buffer = true; // newly-created views may reference an existing buffer without owning it
 
     void calculate_element_count();
     void check_accelerator_match(const std::shared_ptr<Tensor>& other) const;
     void allocate_buffer();
     void validate_shape(const std::vector<u32>& shape) const;
     void validate_data_transfer(u64 size_bytes, u64 offset_bytes = 0) const;
-    std::shared_ptr<Tensor> create_view_with_shape(const std::vector<u32>& new_shape) const;
     void cleanup_buffer();
 };
 

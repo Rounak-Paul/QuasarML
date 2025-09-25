@@ -46,6 +46,15 @@ public:
     
     // Reduction operations
     std::shared_ptr<Tensor> sum_axis(std::shared_ptr<Tensor> tensor, u32 axis);
+    std::shared_ptr<Tensor> mean_axis(std::shared_ptr<Tensor> tensor, u32 axis);
+    std::shared_ptr<Tensor> min_axis(std::shared_ptr<Tensor> tensor, u32 axis);
+    std::shared_ptr<Tensor> max_axis(std::shared_ptr<Tensor> tensor, u32 axis);
+
+    // Elementwise power (supports float dtypes)
+    std::shared_ptr<Tensor> pow(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+
+    // Simple slicing (returns a new tensor with copied data)
+    std::shared_ptr<Tensor> slice(std::shared_ptr<Tensor> tensor, const std::vector<u32>& start, const std::vector<u32>& lengths);
 
 private:
     void validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) const;
@@ -64,7 +73,11 @@ private:
     std::string generate_matmul_kernel_source(DataType dtype) const;
     std::string generate_transpose_kernel_source(DataType dtype) const;
     std::string generate_sum_axis_kernel_source(DataType dtype) const;
+    std::string generate_reduce_axis_kernel_source(DataType dtype, const std::string& op) const;
+    std::string generate_reduce_axis_first_pass_kernel_source(DataType dtype, const std::string& op, u32 local_size) const;
+    std::string generate_reduce_axis_second_pass_kernel_source(DataType dtype, const std::string& op) const;
     std::string generate_relu_kernel_source(DataType dtype) const;
+    std::string generate_strided_gather_kernel_source(DataType dtype) const;
     std::string get_kernel_name_for_dtype(const std::string& base_name, DataType dtype) const;
 };
 

@@ -55,7 +55,7 @@ Tensor::Tensor(Tensor&& other) noexcept
 }
 
 
-Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only)
+Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only, bool owns_buffer)
     : _accelerator(accelerator)
     , _backend(backend)
     , _buffer(buffer)
@@ -63,9 +63,29 @@ Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::
     , _dtype(dtype)
     , _device_only(device_only)
     , _is_valid(true)
+    , _element_offset(0)
+    , _owns_buffer(owns_buffer)
 {
     validate_shape(_shape);
     calculate_element_count();
+}
+
+Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only, u64 element_offset, bool owns_buffer)
+    : _accelerator(accelerator)
+    , _backend(backend)
+    , _buffer(buffer)
+    , _shape(shape)
+    , _dtype(dtype)
+    , _device_only(device_only)
+    , _is_valid(true)
+    , _element_offset(element_offset)
+    , _owns_buffer(owns_buffer)
+{
+    validate_shape(_shape);
+    calculate_element_count();
+    // ensure offset+size doesn't exceed buffer
+    u64 needed = _element_offset * get_element_size() + get_size_bytes();
+    if (needed > _buffer.size) throw std::invalid_argument("View exceeds buffer bounds");
 }
 
 Tensor& Tensor::operator=(Tensor&& other) noexcept {
@@ -259,7 +279,13 @@ void Tensor::validate_data_transfer(u64 size_bytes, u64 offset_bytes) const {
 }
 
 std::shared_ptr<Tensor> Tensor::create_view_with_shape(const std::vector<u32>& new_shape) const {
-    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only);
+    // Views should not take ownership of the underlying buffer
+    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only, /*owns_buffer=*/false);
+}
+
+std::shared_ptr<Tensor> Tensor::create_view_with_shape_and_offset(const std::vector<u32>& new_shape, u64 element_offset) const {
+    // Views should not take ownership of the underlying buffer
+    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only, element_offset + _element_offset, /*owns_buffer=*/false);
 }
 // Operator overloads
 std::shared_ptr<Tensor> Tensor::operator+(const std::shared_ptr<Tensor>& other) const {
@@ -313,7 +339,8 @@ std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor) {
 }
 
 void Tensor::cleanup_buffer() {
-    if (_backend && _buffer.is_valid()) _backend->destroy_buffer(const_cast<VulkanBackend::Buffer&>(_buffer));
+    // Only destroy underlying buffer if this Tensor owns it. Views reference the buffer but do not own it.
+    if (_owns_buffer && _backend && _buffer.is_valid()) _backend->destroy_buffer(const_cast<VulkanBackend::Buffer&>(_buffer));
     _buffer = {};
     _is_valid = false;
 }

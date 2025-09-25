@@ -27,6 +27,12 @@ class VulkanBackend {
         // Helper to check if buffer is valid
         bool is_valid() const { return buffer != VK_NULL_HANDLE; }
     };
+
+    struct BufferBinding {
+        Buffer* buffer = nullptr;
+        VkDeviceSize offset = 0;
+        VkDeviceSize range = 0;
+    };
     
     // Create GPU buffer (storage buffer for compute operations)
     Buffer create_storage_buffer(VkDeviceSize size, bool host_visible = false);
@@ -84,7 +90,7 @@ class VulkanBackend {
     // Execute compute shader synchronously (one-shot execution)
     void execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y = 1, u32 group_z = 1, 
                     const void* push_constants = nullptr, u32 push_constant_size = 0,
-                    const std::vector<Buffer*>& buffers = {});
+                    const std::vector<BufferBinding>& buffers = {});
     
     // Begin recording compute commands (for batched operations)
     void begin_compute_recording();
@@ -92,7 +98,7 @@ class VulkanBackend {
     // Record compute dispatch
     void record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y = 1, u32 group_z = 1,
                             const void* push_constants = nullptr, u32 push_constant_size = 0,
-                            const std::vector<Buffer*>& buffers = {});
+                            const std::vector<BufferBinding>& buffers = {});
     
     // Submit and execute recorded commands
     void execute_recorded_commands();

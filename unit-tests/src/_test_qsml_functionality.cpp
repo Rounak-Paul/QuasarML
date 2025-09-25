@@ -333,6 +333,118 @@ void main() {
             return ok;
         });
 
+        run("pow_and_reductions", []() {
+            std::cout << "[pow_and_reductions]\n";
+            Accelerator acc("PowReduce");
+            if (!acc.is_valid()) return false;
+
+            // pow scalar: [1,2,3] ^ 2 => [1,4,9]
+            std::vector<float> a = {1.0f,2.0f,3.0f};
+            auto ta = acc.create_tensor(a.data(), {3}, DataType::F32);
+            float p = 2.0f;
+            auto tp = acc.create_tensor(&p, {1}, DataType::F32);
+            auto tout = acc.ops().pow(ta, tp);
+            if (!tout) return false;
+            std::vector<float> out(3); tout->download_data(out.data());
+            bool ok = (std::fabs(out[0]-1.0f) < 1e-4f) && (std::fabs(out[2]-9.0f) < 1e-3f);
+
+            // min/max/mean along axis for 2x3
+            std::vector<float> M = {1,5,3, 4,2,6}; // 2x3
+            auto tM = acc.create_tensor(M.data(), {2,3}, DataType::F32);
+            auto min0 = acc.ops().min_axis(tM, 0); // axis 0 -> shape [3]
+            auto max1 = acc.ops().max_axis(tM, 1); // axis 1 -> shape [2]
+            auto mean0 = acc.ops().mean_axis(tM, 0);
+            if (!min0 || !max1 || !mean0) return false;
+            std::vector<float> vmin(3); min0->download_data(vmin.data());
+            std::vector<float> vmax(2); max1->download_data(vmax.data());
+            std::vector<float> vmean(3); mean0->download_data(vmean.data());
+            // min across rows: [min(1,4)=1, min(5,2)=2, min(3,6)=3]
+            ok = ok && (std::fabs(vmin[0]-1.0f) < 1e-3f) && (std::fabs(vmin[1]-2.0f) < 1e-3f) && (std::fabs(vmin[2]-3.0f) < 1e-3f);
+            // max across cols: row0 max=5, row1 max=6
+            ok = ok && (std::fabs(vmax[0]-5.0f) < 1e-3f) && (std::fabs(vmax[1]-6.0f) < 1e-3f);
+            // mean axis0: [(1+4)/2=2.5, (5+2)/2=3.5, (3+6)/2=4.5]
+            ok = ok && (std::fabs(vmean[0]-2.5f) < 1e-3f) && (std::fabs(vmean[1]-3.5f) < 1e-3f) && (std::fabs(vmean[2]-4.5f) < 1e-3f);
+
+            std::cout << "  pow+reductions => " << (ok ? "OK" : "FAIL") << "\n";
+            return ok;
+        });
+
+        run("slicing_cpu_copy", []() {
+            std::cout << "[slicing_cpu_copy]\n";
+            Accelerator acc("Slice");
+            if (!acc.is_valid()) return false;
+            std::vector<float> A = {1,2,3,4,5,6,7,8,9}; // 3x3
+            auto t = acc.create_tensor(A.data(), {3,3}, DataType::F32);
+            if (!t) return false;
+            // slice rows 0..1, cols 1..2 => start {0,1}, lengths {2,2}
+            auto s = acc.ops().slice(t, {0,1}, {2,2});
+            if (!s) return false;
+            std::vector<float> out(4); s->download_data(out.data());
+            // expected [[2,3],[5,6]] row-major => [2,3,5,6]
+            bool ok = (std::fabs(out[0]-2.0f) < 1e-4f) && (std::fabs(out[3]-6.0f) < 1e-4f);
+            std::cout << "  slicing => " << (ok ? "OK" : "FAIL") << "\n";
+            return ok;
+        });
+
+            run("slicing_strided_gpu", []() {
+                std::cout << "[slicing_strided_gpu]\n";
+                Accelerator acc("SliceGPU");
+                if (!acc.is_valid()) return false;
+
+                // 3x4 matrix, test a non-contiguous slice (rows 0..2 step 1, cols 1..3)
+                std::vector<float> A = {
+                    1, 2, 3, 4,
+                    5, 6, 7, 8,
+                    9,10,11,12
+                };
+                auto t = acc.create_tensor(A.data(), {3,4}, DataType::F32);
+                if (!t) return false;
+                // slice start {0,1}, lengths {3,2} -> expected [2,3,6,7,10,11]
+                auto s = acc.ops().slice(t, {0,1}, {3,2});
+                if (!s) return false;
+                std::vector<float> out(6); s->download_data(out.data());
+                bool ok = (std::fabs(out[0]-2.0f) < 1e-4f) && (std::fabs(out[5]-11.0f) < 1e-4f);
+                if (!ok) {
+                    std::cout << "  slicing_strided_gpu: got output: ";
+                    for (auto v : out) std::cout << v << " ";
+                    std::cout << "\n";
+                }
+
+                // also test a 3D case: shape [2,2,3], slice middle axis
+                std::vector<float> B = {
+                    1,2,3, 4,5,6,
+                    7,8,9,10,11,12
+                }; // shape 2x2x3
+                auto t3 = acc.create_tensor(B.data(), {2,2,3}, DataType::F32);
+                if (!t3) return false;
+                // slice start {0,1,1}, lengths {2,1,2} -> pick the last two entries of middle row in each outer
+                auto s3 = acc.ops().slice(t3, {0,1,1}, {2,1,2});
+                if (!s3) return false;
+                std::vector<float> out3(4); s3->download_data(out3.data());
+                // expected: [5,6,11,12]
+                bool ok3 = (std::fabs(out3[0]-5.0f) < 1e-3f) && (std::fabs(out3[3]-12.0f) < 1e-3f);
+                if (!ok3) {
+                    std::cout << "  slicing_strided_gpu (3D) got: "; for (auto v: out3) std::cout << v << " "; std::cout << "\n";
+                }
+                ok = ok && ok3;
+
+                // test an integer dtype slice to ensure dtype-agnostic copy (I32)
+                std::vector<int32_t> I = {1,2,3,4,5,6}; // shape 2x3
+                auto ti = acc.create_tensor(I.data(), {2,3}, DataType::I32);
+                if (!ti) return false;
+                auto si = acc.ops().slice(ti, {0,1}, {2,2});
+                if (!si) return false;
+                std::vector<int32_t> oi(4); si->download_data(oi.data());
+                bool oki = (oi[0] == 2) && (oi[3] == 6);
+                if (!oki) {
+                    std::cout << "  slicing_strided_gpu (I32) got: "; for (auto v: oi) std::cout << v << " "; std::cout << "\n";
+                }
+                ok = ok && oki;
+
+                std::cout << "  slicing_strided_gpu => " << (ok ? "OK" : "FAIL") << "\n";
+                return ok;
+            });
+
         run("kernel_create_and_optional_execute", []() {
             std::cout << "[kernel_create_and_optional_execute]\n";
             Accelerator acc("KernelTest");

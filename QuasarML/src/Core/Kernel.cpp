@@ -103,16 +103,21 @@ void Kernel::execute(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void*
     }
 
     // Collect raw buffer pointers in binding order for backend
-    std::vector<VulkanBackend::Buffer*> buffers;
-    buffers.reserve(_expected_tensor_count);
+    std::vector<VulkanBackend::BufferBinding> bindings;
+    bindings.reserve(_expected_tensor_count);
     for (u32 i = 0; i < _expected_tensor_count; ++i) {
         auto sp = _bound_tensors[i].lock();
         if (!sp) throw std::runtime_error("Bound tensor expired unexpectedly");
-        buffers.push_back(&sp->get_buffer());
+    VulkanBackend::BufferBinding bb;
+    bb.buffer = &sp->get_buffer();
+    bb.offset = static_cast<VkDeviceSize>(sp->get_element_offset() * sp->get_element_size());
+    // range=0 means full buffer from offset
+    bb.range = 0;
+        bindings.push_back(bb);
     }
 
     _backend->execute_compute(_pipeline, dispatch_x, dispatch_y, dispatch_z,
-                              push_data, _push_constant_size, buffers);
+                              push_data, _push_constant_size, bindings);
 }
 
 void Kernel::record_execution(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
@@ -124,16 +129,20 @@ void Kernel::record_execution(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, co
         if (!push_data) throw std::invalid_argument("Kernel expects push constants but none provided");
     }
 
-    std::vector<VulkanBackend::Buffer*> buffers;
-    buffers.reserve(_expected_tensor_count);
+    std::vector<VulkanBackend::BufferBinding> bindings;
+    bindings.reserve(_expected_tensor_count);
     for (u32 i = 0; i < _expected_tensor_count; ++i) {
         auto sp = _bound_tensors[i].lock();
         if (!sp) throw std::runtime_error("Bound tensor expired unexpectedly");
-        buffers.push_back(&sp->get_buffer());
+        VulkanBackend::BufferBinding bb;
+        bb.buffer = &sp->get_buffer();
+        bb.offset = 0;
+        bb.range = sp->get_buffer().size;
+        bindings.push_back(bb);
     }
 
     _backend->record_compute_dispatch(_pipeline, dispatch_x, dispatch_y, dispatch_z,
-                                      push_data, _push_constant_size, buffers);
+                                      push_data, _push_constant_size, bindings);
 }
 
 bool Kernel::is_valid() const {

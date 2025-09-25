@@ -388,7 +388,7 @@ VkDescriptorSet VulkanBackend::allocate_descriptor_set(ComputePipeline& pipeline
 
 void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z, 
                                    const void* push_constants, u32 push_constant_size,
-                                   const std::vector<Buffer*>& buffers) {
+                                   const std::vector<BufferBinding>& buffers) {
     begin_compute_recording();
     record_compute_dispatch(pipeline, group_x, group_y, group_z, push_constants, push_constant_size, buffers);
     execute_recorded_commands();
@@ -397,7 +397,7 @@ void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 
 
 void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
                                            const void* push_constants, u32 push_constant_size,
-                                           const std::vector<Buffer*>& buffers) {
+                                           const std::vector<BufferBinding>& buffers) {
     if (!_recording) {
         LOG_ERROR("Must call begin_compute_recording() first");
         return;
@@ -412,9 +412,22 @@ void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group
         std::vector<VkWriteDescriptorSet> writes(buffers.size());
         
         for (size_t i = 0; i < buffers.size(); ++i) {
-            buffer_infos[i].buffer = buffers[i]->buffer;
-            buffer_infos[i].offset = 0;
-            buffer_infos[i].range = buffers[i]->size;
+            auto b = buffers[i].buffer;
+            if (!b) throw std::runtime_error("Null buffer binding provided");
+            buffer_infos[i].buffer = b->buffer;
+            buffer_infos[i].offset = buffers[i].offset;
+            // If caller passed range==0 treat it as "to the end of the underlying buffer from offset".
+            // Use (b->size - offset) as the descriptor range so that offset + range does not exceed buffer size.
+            VkDeviceSize effective_range = 0;
+            if (buffers[i].range == 0) {
+                if (buffers[i].offset >= b->size) {
+                    throw std::runtime_error("Buffer binding offset exceeds underlying buffer size");
+                }
+                effective_range = b->size - buffers[i].offset;
+            } else {
+                effective_range = buffers[i].range;
+            }
+            buffer_infos[i].range = effective_range;
             
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = descriptor_set;
@@ -424,7 +437,7 @@ void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group
             writes[i].descriptorCount = 1;
             writes[i].pBufferInfo = &buffer_infos[i];
         }
-        
+
         vkUpdateDescriptorSets(_ctx.device.logical_device, static_cast<u32>(writes.size()), 
                               writes.data(), 0, nullptr);
     }
