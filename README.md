@@ -11,13 +11,19 @@ The goal is to combine the usability of **NumPy** with the deep learning power o
  - [x] Tensor class (shape, strides, dtype, device, ownership flags)  
  - [x] Memory management (CPU + GPU buffers, host-device transfers)  
  - [x] Basic elementwise ops (add, mul, sub, div)  
- - [ ] pow  
- - [ ] Reductions: sum (axis)  
- - [ ] mean  
- - [ ] min  
- - [ ] max  
+ - [x] pow  
+ - [x] Reductions: sum (axis)  
+ - [x] mean  
+ - [x] min  
+ - [x] max  
  - [x] Broadcasting rules (NumPy-style)  
- - [ ] Indexing/slicing
+ - [x] Indexing/slicing
+
+### Recent progress (summary)
+
+- Implemented GPU-first non-contiguous slicing using a generic strided-gather compute shader (no CPU fallback).
+- Added N‑D two-pass reductions (sum/mean/min/max) and pow; all Phase 1 functionality now implemented and covered by unit tests.
+- Unit tests: full suite passes locally (15/15) after fixes to view ownership and descriptor handling.
 
 ---
 

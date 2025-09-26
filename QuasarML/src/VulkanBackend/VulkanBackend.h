@@ -125,6 +125,9 @@ class VulkanBackend {
     // Memory barrier for compute operations
     void memory_barrier();
 
+    // Query whether the backend successfully initialized and the logical device is valid
+    bool is_valid() const;
+
     private:
     bool _recording = false;  // Track if we're recording commands
     

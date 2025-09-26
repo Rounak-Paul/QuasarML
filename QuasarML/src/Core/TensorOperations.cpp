@@ -18,21 +18,7 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
     if (!a || !b) throw std::invalid_argument("Tensor pointers cannot be null");
     if (!a->is_valid() || !b->is_valid()) throw std::invalid_argument("All tensors must be valid");
 
-    // scalar broadcast fast-path
-    if (a->get_element_count() == 1) {
-        std::vector<u8> buf(a->get_element_size());
-        a->download_data(buf.data());
-        float scalar = 0.0f;
-        if (a->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        return add_scalar(b, scalar);
-    }
-    if (b->get_element_count() == 1) {
-        std::vector<u8> buf(b->get_element_size());
-        b->download_data(buf.data());
-        float scalar = 0.0f;
-        if (b->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        return add_scalar(a, scalar);
-    }
+    // scalar tensors are handled via the broadcasting elementwise kernels on-device
 
     if (!a->is_shape_compatible(*b)) {
         // try general broadcasting
@@ -40,6 +26,58 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
+        // If accelerator is in CPU mode, perform CPU broadcasting implementation
+        if (!_accelerator.use_gpu()) {
+            // download both tensors
+            u64 out_count = calculate_element_count(out_shape);
+            std::vector<float> out_buf(out_count);
+            // simple generic broadcasting: expand indices
+            // download raw data as float for now (only F32 supported in CPU fallback)
+            if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 in this simplified path");
+            u64 a_count = a->get_element_count();
+            u64 b_count = b->get_element_count();
+            std::vector<float> a_buf(a_count), b_buf(b_count);
+            a->download_data(a_buf.data());
+            b->download_data(b_buf.data());
+            // compute broadcasted add
+            auto get_val = [](const std::vector<float>& buf, const std::vector<u32>& shape, const std::vector<u32>& idx) {
+                // compute flat index (C-order)
+                u64 flat = 0; u64 stride = 1;
+                for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
+                    flat += static_cast<u64>(idx[i]) * stride;
+                    stride *= shape[i];
+                }
+                return buf[flat];
+            };
+            std::vector<u32> idx(out_shape.size());
+            std::vector<u32> a_shape = a->get_shape(); std::vector<u32> b_shape = b->get_shape();
+            // iterate over out indices (naive multi-loop)
+            for (u64 i = 0; i < out_count; ++i) {
+                // unravel
+                u64 rem = i; u64 denom = out_count;
+                for (size_t d = 0; d < out_shape.size(); ++d) {
+                    denom /= out_shape[d];
+                    idx[d] = static_cast<u32>(rem / denom);
+                    rem = rem % denom;
+                }
+                // map to a/b coords (right align)
+                std::vector<u32> a_idx(a_shape.size()), b_idx(b_shape.size());
+                for (int d = 0; d < static_cast<int>(a_shape.size()); ++d) {
+                    int od = static_cast<int>(out_shape.size()) - static_cast<int>(a_shape.size()) + d;
+                    if (od < 0) a_idx[d] = 0; else a_idx[d] = (a_shape[d] == 1) ? 0 : idx[od];
+                }
+                for (int d = 0; d < static_cast<int>(b_shape.size()); ++d) {
+                    int od = static_cast<int>(out_shape.size()) - static_cast<int>(b_shape.size()) + d;
+                    if (od < 0) b_idx[d] = 0; else b_idx[d] = (b_shape[d] == 1) ? 0 : idx[od];
+                }
+                float va = get_val(a_buf, a_shape, a_idx);
+                float vb = get_val(b_buf, b_shape, b_idx);
+                out_buf[i] = va + vb;
+            }
+            auto result = _accelerator.create_tensor(out_buf.data(), out_shape, dtype, /*device_only=*/false);
+            return result;
+        }
+
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
         // prepare meta buffer: layout vec of uints as described in generator
@@ -74,8 +112,8 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
         for (u32 v : b_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : out_strides) meta.push_back(static_cast<u32>(v));
 
-        // create host-visible tensor for meta
-        auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    // create device-only tensor for meta (keep meta on GPU)
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
         std::string kernel_name = get_kernel_name_for_dtype("add_broadcast", dtype);
         std::string glsl_source = generate_elementwise_kernel_source("data_a[a_index] + data_b[b_index]", dtype, false, true, max_rank);
@@ -86,6 +124,18 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
     }
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
+
+    if (!_accelerator.use_gpu()) {
+        // CPU elementwise path for equal-shaped tensors (F32 only simplified)
+        if (a->get_dtype() != DataType::F32 || b->get_dtype() != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for elementwise ops");
+        u64 count = a->get_element_count();
+        std::vector<float> a_buf(count), b_buf(count), out_buf(count);
+        a->download_data(a_buf.data());
+        b->download_data(b_buf.data());
+        for (u64 i = 0; i < count; ++i) out_buf[i] = a_buf[i] + b_buf[i];
+        auto result = _accelerator.create_tensor(out_buf.data(), a->get_shape(), a->get_dtype(), /*device_only=*/false);
+        return result;
+    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("add", a->get_dtype());
@@ -101,42 +151,33 @@ std::shared_ptr<Tensor> TensorOperations::sub(std::shared_ptr<Tensor> a, std::sh
     if (!a || !b) throw std::invalid_argument("Tensor pointers cannot be null");
     if (!a->is_valid() || !b->is_valid()) throw std::invalid_argument("All tensors must be valid");
 
-    if (a->get_element_count() == 1) {
-        std::vector<u8> buf(a->get_element_size());
-        a->download_data(buf.data());
-        float scalar = 0.0f;
-        if (a->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        // scalar - tensor : create kernel that computes pc.scalar - data_in[index]
-        DataType dtype = b->get_dtype();
-        auto result = _accelerator.create_tensor(b->get_shape(), dtype);
-        std::string kernel_name = get_kernel_name_for_dtype("sub_scalar_left", dtype);
-        std::string glsl_source = generate_elementwise_kernel_source("pc.scalar - data_in[index]", dtype, true);
-        auto kernel = get_or_create_kernel(kernel_name, glsl_source, 2, sizeof(float));
-    u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(b->get_element_count()));
-    auto pc = make_push_constant(buf.data(), b->get_dtype());
-    _accelerator.execute(kernel, {b, result}, dispatch_size, 1, 1, pc.first.data());
-        return result;
-    }
-    if (b->get_element_count() == 1) {
-        std::vector<u8> buf(b->get_element_size());
-        b->download_data(buf.data());
-        float scalar = 0.0f;
-        if (b->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
-        std::string kernel_name = get_kernel_name_for_dtype("sub_scalar", a->get_dtype());
-        std::string glsl_source = generate_elementwise_kernel_source("data_in[index] - pc.scalar", a->get_dtype(), true);
-        auto kernel = get_or_create_kernel(kernel_name, glsl_source, 2, sizeof(float));
-    u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
-    auto pc = make_push_constant(buf.data(), a->get_dtype());
-    _accelerator.execute(kernel, {a, result}, dispatch_size, 1, 1, pc.first.data());
-        return result;
-    }
+    // scalar tensors are handled via the broadcasting elementwise kernels on-device
 
     if (!a->is_shape_compatible(*b)) {
         auto out_shape = compute_broadcast_shape(a->get_shape(), b->get_shape());
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
+        if (!_accelerator.use_gpu()) {
+            if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+            u64 out_count = calculate_element_count(out_shape);
+            std::vector<float> out_buf(out_count);
+            u64 a_count = a->get_element_count(); std::vector<float> a_buf(a_count); a->download_data(a_buf.data());
+            u64 b_count = b->get_element_count(); std::vector<float> b_buf(b_count); b->download_data(b_buf.data());
+            // naive broadcast as in add
+            std::vector<u32> idx(out_shape.size()); std::vector<u32> a_shape = a->get_shape(); std::vector<u32> b_shape = b->get_shape();
+            for (u64 i = 0; i < out_count; ++i) {
+                u64 rem = i; u64 denom = out_count;
+                for (size_t d = 0; d < out_shape.size(); ++d) { denom /= out_shape[d]; idx[d] = static_cast<u32>(rem / denom); rem = rem % denom; }
+                std::vector<u32> a_idx(a_shape.size()), b_idx(b_shape.size());
+                for (int d = 0; d < static_cast<int>(a_shape.size()); ++d) { int od = static_cast<int>(out_shape.size()) - static_cast<int>(a_shape.size()) + d; if (od < 0) a_idx[d] = 0; else a_idx[d] = (a_shape[d] == 1) ? 0 : idx[od]; }
+                for (int d = 0; d < static_cast<int>(b_shape.size()); ++d) { int od = static_cast<int>(out_shape.size()) - static_cast<int>(b_shape.size()) + d; if (od < 0) b_idx[d] = 0; else b_idx[d] = (b_shape[d] == 1) ? 0 : idx[od]; }
+                auto get_val = [](const std::vector<float>& buf, const std::vector<u32>& shape, const std::vector<u32>& idx)->float { u64 flat=0, stride=1; for (int i = static_cast<int>(shape.size())-1;i>=0;--i){ flat += static_cast<u64>(idx[i])*stride; stride *= shape[i]; } return buf[flat]; };
+                out_buf[i] = get_val(a_buf, a_shape, a_idx) - get_val(b_buf, b_shape, b_idx);
+            }
+            return _accelerator.create_tensor(out_buf.data(), out_shape, dtype, false);
+        }
+
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
         u32 max_rank = static_cast<u32>(std::max(a->get_rank(), b->get_rank()));
@@ -168,7 +209,7 @@ std::shared_ptr<Tensor> TensorOperations::sub(std::shared_ptr<Tensor> a, std::sh
         for (u32 v : b_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : out_strides) meta.push_back(static_cast<u32>(v));
 
-        auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
         std::string kernel_name = get_kernel_name_for_dtype("sub_broadcast", dtype);
         std::string glsl_source = generate_elementwise_kernel_source("data_a[a_index] - data_b[b_index]", dtype, false, true, max_rank);
@@ -179,6 +220,14 @@ std::shared_ptr<Tensor> TensorOperations::sub(std::shared_ptr<Tensor> a, std::sh
     }
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
+
+    if (!_accelerator.use_gpu()) {
+        if (a->get_dtype() != DataType::F32 || b->get_dtype() != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u64 count = a->get_element_count(); std::vector<float> a_buf(count), b_buf(count), out_buf(count);
+        a->download_data(a_buf.data()); b->download_data(b_buf.data());
+        for (u64 i = 0; i < count; ++i) out_buf[i] = a_buf[i] - b_buf[i];
+        return _accelerator.create_tensor(out_buf.data(), a->get_shape(), a->get_dtype(), false);
+    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("sub", a->get_dtype());
@@ -193,26 +242,23 @@ std::shared_ptr<Tensor> TensorOperations::mul(std::shared_ptr<Tensor> a, std::sh
     if (!a || !b) throw std::invalid_argument("Tensor pointers cannot be null");
     if (!a->is_valid() || !b->is_valid()) throw std::invalid_argument("All tensors must be valid");
 
-    if (a->get_element_count() == 1) {
-        std::vector<u8> buf(a->get_element_size());
-        a->download_data(buf.data());
-        float scalar = 0.0f;
-        if (a->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        return mul_scalar(b, scalar);
-    }
-    if (b->get_element_count() == 1) {
-        std::vector<u8> buf(b->get_element_size());
-        b->download_data(buf.data());
-        float scalar = 0.0f;
-        if (b->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        return mul_scalar(a, scalar);
-    }
+    // scalar tensors are handled via the broadcasting elementwise kernels on-device
 
     if (!a->is_shape_compatible(*b)) {
         auto out_shape = compute_broadcast_shape(a->get_shape(), b->get_shape());
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
+        if (!_accelerator.use_gpu()) {
+            if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+            u64 out_count = calculate_element_count(out_shape); std::vector<float> out_buf(out_count);
+            u64 a_count = a->get_element_count(); std::vector<float> a_buf(a_count); a->download_data(a_buf.data());
+            u64 b_count = b->get_element_count(); std::vector<float> b_buf(b_count); b->download_data(b_buf.data());
+            std::vector<u32> idx(out_shape.size()); std::vector<u32> a_shape=a->get_shape(), b_shape=b->get_shape();
+            for (u64 i=0;i<out_count;++i){ u64 rem=i, denom=out_count; for (size_t d=0; d<out_shape.size(); ++d){ denom/=out_shape[d]; idx[d]=static_cast<u32>(rem/denom); rem%=denom; } std::vector<u32> a_idx(a_shape.size()), b_idx(b_shape.size()); for (int d=0; d<static_cast<int>(a_shape.size()); ++d){ int od = static_cast<int>(out_shape.size())-static_cast<int>(a_shape.size())+d; a_idx[d]= (od<0)?0:((a_shape[d]==1)?0:idx[od]); } for (int d=0; d<static_cast<int>(b_shape.size()); ++d){ int od = static_cast<int>(out_shape.size())-static_cast<int>(b_shape.size())+d; b_idx[d]= (od<0)?0:((b_shape[d]==1)?0:idx[od]); } auto get_val=[&](const std::vector<float>& buf,const std::vector<u32>& shape,const std::vector<u32>& idx){ u64 flat=0,stride=1; for (int k=static_cast<int>(shape.size())-1;k>=0;--k){ flat+=static_cast<u64>(idx[k])*stride; stride*=shape[k]; } return buf[flat]; }; out_buf[i]=get_val(a_buf,a_shape,a_idx)*get_val(b_buf,b_shape,b_idx); }
+            return _accelerator.create_tensor(out_buf.data(), out_shape, dtype, false);
+        }
+
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
         u32 max_rank = static_cast<u32>(std::max(a->get_rank(), b->get_rank()));
@@ -244,7 +290,7 @@ std::shared_ptr<Tensor> TensorOperations::mul(std::shared_ptr<Tensor> a, std::sh
         for (u32 v : b_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : out_strides) meta.push_back(static_cast<u32>(v));
 
-        auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
         std::string kernel_name = get_kernel_name_for_dtype("mul_broadcast", dtype);
         std::string glsl_source = generate_elementwise_kernel_source("data_a[a_index] * data_b[b_index]", dtype, false, true, max_rank);
@@ -255,6 +301,14 @@ std::shared_ptr<Tensor> TensorOperations::mul(std::shared_ptr<Tensor> a, std::sh
     }
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
+
+    if (!_accelerator.use_gpu()) {
+        if (a->get_dtype() != DataType::F32 || b->get_dtype() != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u64 count = a->get_element_count(); std::vector<float> a_buf(count), b_buf(count), out_buf(count);
+        a->download_data(a_buf.data()); b->download_data(b_buf.data());
+        for (u64 i=0;i<count;++i) out_buf[i]=a_buf[i]*b_buf[i];
+        return _accelerator.create_tensor(out_buf.data(), a->get_shape(), a->get_dtype(), false);
+    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("mul", a->get_dtype());
@@ -269,40 +323,23 @@ std::shared_ptr<Tensor> TensorOperations::div(std::shared_ptr<Tensor> a, std::sh
     if (!a || !b) throw std::invalid_argument("Tensor pointers cannot be null");
     if (!a->is_valid() || !b->is_valid()) throw std::invalid_argument("All tensors must be valid");
 
-    if (a->get_element_count() == 1) {
-        std::vector<u8> buf(a->get_element_size());
-        a->download_data(buf.data());
-        float scalar = 0.0f;
-        if (a->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        auto result = _accelerator.create_tensor(b->get_shape(), b->get_dtype());
-        std::string kernel_name = get_kernel_name_for_dtype("div_scalar_left", b->get_dtype());
-        std::string glsl_source = generate_elementwise_kernel_source("pc.scalar / data_in[index]", b->get_dtype(), true);
-        auto kernel = get_or_create_kernel(kernel_name, glsl_source, 2, sizeof(float));
-    u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(b->get_element_count()));
-    auto pc = make_push_constant(buf.data(), b->get_dtype());
-    _accelerator.execute(kernel, {b, result}, dispatch_size, 1, 1, pc.first.data());
-        return result;
-    }
-    if (b->get_element_count() == 1) {
-        std::vector<u8> buf(b->get_element_size());
-        b->download_data(buf.data());
-        float scalar = 0.0f;
-        if (b->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
-        std::string kernel_name = get_kernel_name_for_dtype("div_scalar", a->get_dtype());
-        std::string glsl_source = generate_elementwise_kernel_source("data_in[index] / pc.scalar", a->get_dtype(), true);
-        auto kernel = get_or_create_kernel(kernel_name, glsl_source, 2, sizeof(float));
-    u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
-    auto pc = make_push_constant(buf.data(), a->get_dtype());
-    _accelerator.execute(kernel, {a, result}, dispatch_size, 1, 1, pc.first.data());
-        return result;
-    }
+    // scalar tensors are handled via the broadcasting elementwise kernels on-device
 
     if (!a->is_shape_compatible(*b)) {
         auto out_shape = compute_broadcast_shape(a->get_shape(), b->get_shape());
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
+        if (!_accelerator.use_gpu()) {
+            if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+            u64 out_count = calculate_element_count(out_shape); std::vector<float> out_buf(out_count);
+            u64 a_count = a->get_element_count(); std::vector<float> a_buf(a_count); a->download_data(a_buf.data());
+            u64 b_count = b->get_element_count(); std::vector<float> b_buf(b_count); b->download_data(b_buf.data());
+            std::vector<u32> idx(out_shape.size()); std::vector<u32> a_shape=a->get_shape(), b_shape=b->get_shape();
+            for (u64 i=0;i<out_count;++i){ u64 rem=i, denom=out_count; for (size_t d=0; d<out_shape.size(); ++d){ denom/=out_shape[d]; idx[d]=static_cast<u32>(rem/denom); rem%=denom; } std::vector<u32> a_idx(a_shape.size()), b_idx(b_shape.size()); for (int d=0; d<static_cast<int>(a_shape.size()); ++d){ int od = static_cast<int>(out_shape.size())-static_cast<int>(a_shape.size())+d; a_idx[d]= (od<0)?0:((a_shape[d]==1)?0:idx[od]); } for (int d=0; d<static_cast<int>(b_shape.size()); ++d){ int od = static_cast<int>(out_shape.size())-static_cast<int>(b_shape.size())+d; b_idx[d]= (od<0)?0:((b_shape[d]==1)?0:idx[od]); } auto get_val=[&](const std::vector<float>& buf,const std::vector<u32>& shape,const std::vector<u32>& idx){ u64 flat=0,stride=1; for (int k=static_cast<int>(shape.size())-1;k>=0;--k){ flat+=static_cast<u64>(idx[k])*stride; stride*=shape[k]; } return buf[flat]; }; out_buf[i]=get_val(a_buf,a_shape,a_idx)/get_val(b_buf,b_shape,b_idx); }
+            return _accelerator.create_tensor(out_buf.data(), out_shape, dtype, false);
+        }
+
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
         u32 max_rank = static_cast<u32>(std::max(a->get_rank(), b->get_rank()));
@@ -334,7 +371,7 @@ std::shared_ptr<Tensor> TensorOperations::div(std::shared_ptr<Tensor> a, std::sh
         for (u32 v : b_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : out_strides) meta.push_back(static_cast<u32>(v));
 
-        auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
         std::string kernel_name = get_kernel_name_for_dtype("div_broadcast", dtype);
         std::string glsl_source = generate_elementwise_kernel_source("data_a[a_index] / data_b[b_index]", dtype, false, true, max_rank);
@@ -361,6 +398,12 @@ std::shared_ptr<Tensor> TensorOperations::add_scalar(std::shared_ptr<Tensor> ten
     }
     
     DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u64 count = tensor->get_element_count(); std::vector<float> in(count), out(count);
+        tensor->download_data(in.data()); for (u64 i=0;i<count;++i) out[i]=in[i]+scalar; return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
     std::string kernel_name = get_kernel_name_for_dtype("add_scalar", dtype);
@@ -380,6 +423,12 @@ std::shared_ptr<Tensor> TensorOperations::mul_scalar(std::shared_ptr<Tensor> ten
     }
     
     DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u64 count = tensor->get_element_count(); std::vector<float> in(count), out(count);
+        tensor->download_data(in.data()); for (u64 i=0;i<count;++i) out[i]=in[i]*scalar; return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
     std::string kernel_name = get_kernel_name_for_dtype("mul_scalar", dtype);
@@ -399,6 +448,12 @@ std::shared_ptr<Tensor> TensorOperations::relu(std::shared_ptr<Tensor> tensor) {
     }
     
     DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u64 count = tensor->get_element_count(); std::vector<float> in(count), out(count);
+        tensor->download_data(in.data()); for (u64 i=0;i<count;++i) out[i]= std::max(0.0f, in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
     std::string kernel_name = get_kernel_name_for_dtype("relu", dtype);
@@ -428,6 +483,13 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
     
     DataType dtype = a->get_dtype();
     std::vector<u32> result_shape = {a_shape[0], b_shape[1]};
+    if (!_accelerator.use_gpu()) {
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u32 M = a_shape[0]; u32 K = a_shape[1]; u32 N = b_shape[1]; std::vector<float> A(M*K), B(K*N), C(M*N);
+        a->download_data(A.data()); b->download_data(B.data()); for (u32 i=0;i<M;++i) for (u32 j=0;j<N;++j){ float s=0; for (u32 k=0;k<K;++k) s+=A[i*K+k]*B[k*N+j]; C[i*N+j]=s; }
+        return _accelerator.create_tensor(C.data(), result_shape, dtype, false);
+    }
+
     auto result = _accelerator.create_tensor(result_shape, dtype);
     
     std::string kernel_name = get_kernel_name_for_dtype("matmul", dtype);
@@ -453,6 +515,12 @@ std::shared_ptr<Tensor> TensorOperations::transpose(std::shared_ptr<Tensor> tens
     std::vector<u32> result_shape = {input_shape[1], input_shape[0]};
     
     DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        u32 rows = input_shape[0], cols = input_shape[1]; std::vector<float> in(rows*cols), out(rows*cols);
+        tensor->download_data(in.data()); for (u32 r=0;r<rows;++r) for (u32 c=0;c<cols;++c) out[c*rows + r] = in[r*cols + c]; return _accelerator.create_tensor(out.data(), result_shape, dtype, false);
+    }
+
     auto result = _accelerator.create_tensor(result_shape, dtype);
     
     std::string kernel_name = get_kernel_name_for_dtype("transpose", dtype);
@@ -472,7 +540,7 @@ std::shared_ptr<Tensor> TensorOperations::transpose(std::shared_ptr<Tensor> tens
 }
 
 std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tensor, u32 axis) {
-    // General N-d support: If 2D, use optimized GPU kernel; otherwise fall back to CPU reduce
+    // General N-d support: GPU two-pass reduction (no CPU fallback)
     auto input_shape = tensor->get_shape();
     u32 rank = tensor->get_rank();
     if (axis >= rank) throw std::invalid_argument("Axis out of range");
@@ -482,6 +550,18 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
         u32 expected_result_size = (axis == 0) ? input_shape[1] : input_shape[0];
         std::vector<u32> result_shape = {expected_result_size};
         DataType dtype = tensor->get_dtype();
+            if (!_accelerator.use_gpu()) {
+                if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+                u64 out_count = calculate_element_count(result_shape); std::vector<float> in(tensor->get_element_count()); tensor->download_data(in.data()); std::vector<float> out(out_count, 0.0f);
+                // naive reduce over axis
+                auto shape = tensor->get_shape(); std::vector<u32> idx(shape.size()); u64 total = tensor->get_element_count(); for (u64 i=0;i<total;++i){ // unravel
+                    u64 rem=i, denom=total; for (size_t d=0; d<shape.size(); ++d){ denom/=shape[d]; idx[d]=static_cast<u32>(rem/denom); rem%=denom; }
+                    // compute output index
+                    u64 out_flat=0, out_stride=1; for (int d=static_cast<int>(shape.size())-1; d>=0; --d){ if (static_cast<u32>(d)!=axis){ out_flat += static_cast<u64>(idx[d])*out_stride; out_stride *= (d < static_cast<int>(result_shape.size()) ? result_shape[d - (d>axis?1:0)] : 1); } }
+                    out[out_flat] += in[i]; }
+                return _accelerator.create_tensor(out.data(), result_shape, dtype, false);
+            }
+
         auto result = _accelerator.create_tensor(result_shape, dtype);
         std::string kernel_name = get_kernel_name_for_dtype("sum_axis", dtype);
         std::string glsl_source = generate_sum_axis_kernel_source(dtype);
@@ -503,7 +583,7 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
     auto in_p = pad_dims(shape); auto out_p = pad_dims(out_shape);
     auto in_str = compute_strides_padded(shape, max_rank); auto out_str = compute_strides_padded(out_shape, max_rank);
     for (u32 v:in_p) meta.push_back(v); for (u32 v:out_p) meta.push_back(v); for (u32 v:in_str) meta.push_back(v); for (u32 v:out_str) meta.push_back(v);
-    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
     // two-pass reduction parameters
     u32 red_len = shape[axis];
@@ -575,7 +655,7 @@ std::shared_ptr<Tensor> TensorOperations::min_axis(std::shared_ptr<Tensor> tenso
     auto pad_dims = [&](const std::vector<u32>& s) { std::vector<u32> padded(max_rank,1u); size_t off=max_rank-s.size(); for(size_t i=0;i<s.size();++i) padded[off+i]=s[i]; return padded; };
     auto in_p = pad_dims(shape); auto out_p = pad_dims(out_shape); auto in_str = compute_strides_padded(shape, max_rank); auto out_str = compute_strides_padded(out_shape, max_rank);
     for (u32 v:in_p) meta.push_back(v); for (u32 v:out_p) meta.push_back(v); for (u32 v:in_str) meta.push_back(v); for (u32 v:out_str) meta.push_back(v);
-    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
     u32 red_len = shape[axis];
     const u32 LOCAL = 256u;
     u32 group_size = LOCAL;
@@ -632,7 +712,7 @@ std::shared_ptr<Tensor> TensorOperations::max_axis(std::shared_ptr<Tensor> tenso
     auto pad_dims2 = [&](const std::vector<u32>& s) { std::vector<u32> padded(max_rank,1u); size_t off=max_rank-s.size(); for(size_t i=0;i<s.size();++i) padded[off+i]=s[i]; return padded; };
     auto in_p2 = pad_dims2(shape); auto out_p2 = pad_dims2(out_shape); auto in_str2 = compute_strides_padded(shape, max_rank); auto out_str2 = compute_strides_padded(out_shape, max_rank);
     for (u32 v:in_p2) meta.push_back(v); for (u32 v:out_p2) meta.push_back(v); for (u32 v:in_str2) meta.push_back(v); for (u32 v:out_str2) meta.push_back(v);
-    auto meta_tensor2 = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor2 = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
     u32 red_len2 = shape[axis];
     const u32 LOCAL2 = 256u;
     u32 group_size2 = LOCAL2;
@@ -662,23 +742,7 @@ std::shared_ptr<Tensor> TensorOperations::pow(std::shared_ptr<Tensor> a, std::sh
     if (!a || !b) throw std::invalid_argument("Tensor pointers cannot be null");
     if (!a->is_valid() || !b->is_valid()) throw std::invalid_argument("All tensors must be valid");
 
-    // support scalar power fast-path
-    if (b->get_element_count() == 1) {
-        std::vector<u8> buf(b->get_element_size());
-        b->download_data(buf.data());
-        float scalar = 0.0f;
-        if (b->get_dtype() == DataType::F32) std::memcpy(&scalar, buf.data(), sizeof(float));
-        // generate kernel: pow(data_in[index], pc.scalar)
-        DataType dtype = a->get_dtype();
-        auto result = _accelerator.create_tensor(a->get_shape(), dtype);
-        std::string kernel_name = get_kernel_name_for_dtype("pow_scalar", dtype);
-        std::string glsl = generate_elementwise_kernel_source("pow(data_in[index], pc.scalar)", dtype, true);
-        auto kernel = get_or_create_kernel(kernel_name, glsl, 2, sizeof(float));
-        auto pc = make_push_constant(buf.data(), b->get_dtype());
-        u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
-        _accelerator.execute(kernel, {a, result}, dispatch, 1, 1, pc.first.data());
-        return result;
-    }
+    // scalar power will be handled by the broadcast/elementwise path below using on-device buffers
 
     // broadcast/combine paths: reuse elementwise framework
     if (!a->is_shape_compatible(*b)) {
@@ -710,7 +774,7 @@ std::shared_ptr<Tensor> TensorOperations::pow(std::shared_ptr<Tensor> a, std::sh
         for (u32 v : a_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : b_strides) meta.push_back(static_cast<u32>(v));
         for (u32 v : out_strides) meta.push_back(static_cast<u32>(v));
-        auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
         std::string kernel_name = get_kernel_name_for_dtype("pow_broadcast", dtype);
         std::string glsl_source = generate_elementwise_kernel_source("pow(data_a[a_index], data_b[b_index])", dtype, false, true, max_rank);
         auto kernel = get_or_create_kernel(kernel_name, glsl_source, 4);
@@ -792,7 +856,7 @@ std::shared_ptr<Tensor> TensorOperations::slice(std::shared_ptr<Tensor> tensor, 
     for (auto m : meta) std::cout << m << " ";
     std::cout << "\n";
 
-    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, false);
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
 
     // create output tensor on device
     auto result = _accelerator.create_tensor(std::vector<u32>(lengths.begin(), lengths.end()), dtype);

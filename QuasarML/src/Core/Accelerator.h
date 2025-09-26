@@ -20,6 +20,12 @@ public:
     explicit Accelerator(const std::string& name = "QuasarML", u32 gpu_idx = 0);
     ~Accelerator();
 
+    enum class DeviceMode {
+        Auto, // use GPU if available, otherwise CPU
+        GPU,  // force GPU
+        CPU   // force CPU (host-visible buffers and CPU implementations)
+    };
+
     // Non-copyable but movable
     Accelerator(const Accelerator&) = delete;
     Accelerator& operator=(const Accelerator&) = delete;
@@ -83,6 +89,11 @@ public:
     TensorOperations& ops() { return _tensor_ops; }
     const TensorOperations& ops() const { return _tensor_ops; }
 
+    // Device mode control
+    void set_device_mode(DeviceMode mode) { _device_mode = mode; }
+    DeviceMode get_device_mode() const { return _device_mode; }
+    bool use_gpu() const; // true when operations should run on GPU
+
 
     // ============================================================================
     // UTILITY METHODS
@@ -101,6 +112,8 @@ private:
     mutable u64 _allocated_memory = 0;
     
     TensorOperations _tensor_ops{*this};
+    // Device selection mode (Auto: prefer GPU if available)
+    DeviceMode _device_mode = DeviceMode::Auto;
     
     // Internal helper methods
     void cleanup_dead_tensor_references();

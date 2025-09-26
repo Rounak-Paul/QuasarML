@@ -99,6 +99,11 @@ VulkanBackend::~VulkanBackend()
     _ctx.api_patch = 0;
 }
 
+bool VulkanBackend::is_valid() const {
+    // Consider backend valid if logical device handle was created
+    return _ctx.device.logical_device != VK_NULL_HANDLE;
+}
+
 void VulkanBackend::device_wait_idle()
 {
     vkDeviceWaitIdle(_ctx.device.logical_device);

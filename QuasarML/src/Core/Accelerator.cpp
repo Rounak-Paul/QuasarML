@@ -12,6 +12,14 @@ Accelerator::Accelerator(const std::string& name, u32 gpu_idx)
     }
 }
 
+bool Accelerator::use_gpu() const {
+    // If user forced CPU, return false. If forced GPU, return true. Otherwise Auto - return true when backend exists and is_valid
+    if (_device_mode == DeviceMode::CPU) return false;
+    if (_device_mode == DeviceMode::GPU) return true;
+    // Auto: check backend existence
+    return _backend != nullptr && is_valid();
+}
+
 Accelerator::~Accelerator() {
     if (_backend) {
         _backend->device_wait_idle();
@@ -73,8 +81,13 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");
     }
-    
-    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, device_only);
+    // Respect global device policy: if Accelerator is configured to CPU, make tensors host-visible by default
+    bool final_device_only = device_only;
+    if (!use_gpu()) {
+        final_device_only = false;
+    }
+
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, final_device_only);
     
     _tensors.push_back(tensor);
     _allocated_memory += tensor->get_size_bytes();
@@ -98,7 +111,10 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const void* data,
         throw std::invalid_argument("Data pointer cannot be null");
     }
     
-    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, device_only);
+    bool final_device_only = device_only;
+    if (!use_gpu()) final_device_only = false;
+
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, final_device_only);
     tensor->upload_data(data);
     
     _tensors.push_back(tensor);
@@ -234,7 +250,7 @@ std::pair<u64, u64> Accelerator::get_memory_usage() const {
 }
 
 bool Accelerator::is_valid() const {
-    return _backend != nullptr;
+    return _backend != nullptr && _backend->is_valid();
 }
 
 void Accelerator::cleanup_dead_tensor_references() {
