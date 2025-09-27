@@ -287,6 +287,60 @@ void main() {
             return ok;
         });
 
+        run("cpu_gpu_mode_switch", []() {
+            std::cout << "[cpu_gpu_mode_switch]\n";
+            Accelerator acc("ModeSwitch");
+            if (!acc.is_valid()) return false;
+
+            // ensure GPU-preferred path: reset counter and force GPU
+            acc.reset_cpu_fallback_count();
+            acc.set_device_mode(Accelerator::DeviceMode::GPU);
+
+            // perform an op that could fall back if GPU unsupported
+            std::vector<float> a = {1.0f, 2.0f};
+            std::vector<float> b = {3.0f, 4.0f};
+            auto ta = acc.create_tensor(a.data(), {2}, DataType::F32);
+            auto tb = acc.create_tensor(b.data(), {2}, DataType::F32);
+            if (!ta || !tb) return false;
+            auto tc = acc.ops().add(ta, tb);
+            if (!tc) return false;
+
+            // when GPU forced, we expect CPU fallback count to be zero (no unexpected CPU compute)
+            u32 cnt_gpu = acc.get_cpu_fallback_count();
+
+            // Now force CPU and perform same op; counter should increase
+            acc.set_device_mode(Accelerator::DeviceMode::CPU);
+            auto tc2 = acc.ops().add(ta, tb);
+            if (!tc2) return false;
+            u32 cnt_cpu = acc.get_cpu_fallback_count();
+
+            bool ok = (cnt_gpu == 0u) && (cnt_cpu >= 1u);
+            std::cout << "  cpu/gpu mode fallback counts: gpu=" << cnt_gpu << " cpu=" << cnt_cpu << " => " << (ok?"OK":"FAIL") << "\n";
+            return ok;
+        });
+
+        run("cpu_gpu_broadcast_dtype_check", []() {
+            std::cout << "[cpu_gpu_broadcast_dtype_check]\n";
+            Accelerator acc("ModeBroadcast");
+            if (!acc.is_valid()) return false;
+
+            acc.reset_cpu_fallback_count();
+            // force CPU and test broadcast on an integer dtype
+            acc.set_device_mode(Accelerator::DeviceMode::CPU);
+            std::vector<int32_t> ai = {1, 2}; // shape [2,1]
+            std::vector<int32_t> bi = {10, 20, 30}; // shape [1,3]
+            auto ta = acc.create_tensor(ai.data(), {2,1}, DataType::I32);
+            auto tb = acc.create_tensor(bi.data(), {1,3}, DataType::I32);
+            if (!ta || !tb) return false;
+            auto tout = acc.ops().add(ta, tb);
+            if (!tout) return false;
+            // cpu fallback must have been used
+            u32 cnt = acc.get_cpu_fallback_count();
+            bool ok = (cnt >= 1u);
+            std::cout << "  cpu broadcast fallback count=" << cnt << " => " << (ok?"OK":"FAIL") << "\n";
+            return ok;
+        });
+
         run("scalar_ops", []() {
             std::cout << "[scalar_ops]\n";
             Accelerator acc("ScalarOps");
@@ -486,6 +540,111 @@ void main() {
                 std::cout << "  kernel test exception (skipping): " << e.what() << "\n";
                 return true;
             }
+        });
+
+        // Ensure GPU mode does not trigger CPU fallbacks for the common ops across dtypes
+        run("gpu_mode_all_dtypes_ops_no_cpu_fallback", []() {
+            std::cout << "[gpu_mode_all_dtypes_ops_no_cpu_fallback]\n";
+            Accelerator acc("GpuDtypeVerify");
+            if (!acc.is_valid()) return false;
+
+            acc.reset_cpu_fallback_count();
+            acc.set_device_mode(Accelerator::DeviceMode::GPU);
+
+            bool ok = true;
+
+            std::vector<DataType> dtypes = {
+                DataType::F32,
+                DataType::F16,
+                DataType::I32,
+                DataType::U32,
+                DataType::I16,
+                DataType::U16,
+                DataType::I8,
+                DataType::U8
+            };
+
+            for (auto dt : dtypes) {
+                LOG_DEBUG("gpu_mode test dtype: {}", dtype_to_string(dt));
+                try {
+                    // create simple 2-element tensors for each dtype
+                    std::shared_ptr<Tensor> ta, tb;
+                    switch (dt) {
+                        case DataType::F32: {
+                            std::vector<float> A{1.0f, -2.0f}; std::vector<float> B{3.0f, 4.0f};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::F16: {
+                            // use canonical half encodings for 1.0 and 2.0
+                            std::vector<uint16_t> A{0x3C00u, 0xC000u}; // 1.0, -2.0 (half)
+                            std::vector<uint16_t> B{0x4000u, 0x4000u}; // 2.0, 2.0
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::I32: {
+                            std::vector<int32_t> A{1, -2}; std::vector<int32_t> B{3, 4};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::U32: {
+                            std::vector<uint32_t> A{1u, 2u}; std::vector<uint32_t> B{3u, 4u};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::I16: {
+                            std::vector<int16_t> A{1, -2}; std::vector<int16_t> B{3, 4};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::U16: {
+                            std::vector<uint16_t> A{1u, 2u}; std::vector<uint16_t> B{3u, 4u};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::I8: {
+                            std::vector<int8_t> A{1, -2}; std::vector<int8_t> B{3, 4};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        case DataType::U8: {
+                            std::vector<uint8_t> A{1u, 2u}; std::vector<uint8_t> B{3u, 4u};
+                            ta = acc.create_tensor(A.data(), {2}, dt);
+                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            break;
+                        }
+                        default: break;
+                    }
+
+                    if (!ta || !tb) { ok = false; break; }
+
+                    // elementwise add and mul should execute on GPU when forced
+                    auto r_add = acc.ops().add(ta, tb);
+                    if (!r_add) { ok = false; break; }
+                    auto r_mul = acc.ops().mul(ta, tb);
+                    if (!r_mul) { ok = false; break; }
+
+                    // small relu test where meaningful
+                    auto r_relu = acc.ops().relu(ta);
+                    if (!r_relu) { ok = false; break; }
+
+                } catch (...) {
+                    ok = false;
+                    break;
+                }
+            }
+
+            u32 cnt = acc.get_cpu_fallback_count();
+            bool final_ok = ok && (cnt == 0u);
+            LOG_INFO("gpu-mode cpu-fallback counter={} => {}", cnt, (final_ok ? "OK" : "FAIL"));
+            return final_ok;
         });
 
         // All-new tests added

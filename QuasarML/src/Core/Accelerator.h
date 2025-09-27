@@ -5,6 +5,7 @@
 #include "TensorOperations.h"
 #include <VulkanBackend/VulkanBackend.h>
 #include <memory>
+#include <atomic>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -94,6 +95,11 @@ public:
     DeviceMode get_device_mode() const { return _device_mode; }
     bool use_gpu() const; // true when operations should run on GPU
 
+    // CPU fallback instrumentation (tests can query how often CPU implementations ran)
+    void notify_cpu_fallback();
+    u32 get_cpu_fallback_count() const;
+    void reset_cpu_fallback_count();
+
 
     // ============================================================================
     // UTILITY METHODS
@@ -114,6 +120,8 @@ private:
     TensorOperations _tensor_ops{*this};
     // Device selection mode (Auto: prefer GPU if available)
     DeviceMode _device_mode = DeviceMode::Auto;
+    // instrumentation: number of times CPU fallback path was taken
+    mutable std::atomic<u32> _cpu_fallback_count{0};
     
     // Internal helper methods
     void cleanup_dead_tensor_references();

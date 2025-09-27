@@ -253,6 +253,18 @@ bool Accelerator::is_valid() const {
     return _backend != nullptr && _backend->is_valid();
 }
 
+void Accelerator::notify_cpu_fallback() {
+    _cpu_fallback_count.fetch_add(1u, std::memory_order_relaxed);
+}
+
+u32 Accelerator::get_cpu_fallback_count() const {
+    return _cpu_fallback_count.load(std::memory_order_relaxed);
+}
+
+void Accelerator::reset_cpu_fallback_count() {
+    _cpu_fallback_count.store(0u, std::memory_order_relaxed);
+}
+
 void Accelerator::cleanup_dead_tensor_references() {
     auto old_size = _tensors.size();
     

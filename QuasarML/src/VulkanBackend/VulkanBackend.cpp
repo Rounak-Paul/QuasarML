@@ -584,6 +584,27 @@ static b8 load_compute_shader_module(const std::string& glsl_code, VkDevice devi
         u64 error_count = shaderc_result_get_num_errors(result);
         LOG_ERROR("Error compiling compute shader with {} errors:", error_count);
         LOG_ERROR("Error(s):\n{}", error_message);
+        // Print a snippet of the GLSL source to help debug malformed generated shaders
+        size_t snippet_len = std::min<size_t>(glsl_code.size(), 2048);
+        if (snippet_len > 0) {
+            std::string snippet = glsl_code.substr(0, snippet_len);
+                LOG_ERROR("GLSL snippet (first {} chars):\n{}", snippet_len, snippet);
+                // Also write the full GLSL (or truncated snippet) to a temp file for post-mortem inspection
+                try {
+                    auto now = std::chrono::system_clock::now();
+                    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+                    std::ostringstream fname;
+                    fname << "/tmp/quasar_shader_error_" << ms << ".glsl";
+                    std::ofstream ofs(fname.str(), std::ios::out | std::ios::trunc);
+                    if (ofs.is_open()) {
+                        ofs << glsl_code;
+                        ofs.close();
+                        LOG_ERROR("Wrote GLSL snippet to {}", fname.str());
+                    }
+                } catch (...) {
+                    // best-effort only
+                }
+        }
         shaderc_result_release(result);
         return false;
     }
