@@ -1,15 +1,19 @@
-    // Minimal, clean functionality test for QuasarML public API
-    #include <iostream>
-    #include <vector>
-    #include <memory>
-    #include <cmath>
-    #include "QuasarML.h"
-    // Include operator overloads for shared_ptr<Tensor>
-    #include <Core/TensorOps.h>
+// Minimal, clean functionality test for QuasarML public API
+#include <iostream>
+#include <vector>
+#include <memory>
+#include <cmath>
+#include <filesystem>
+#include <regex>
+#include <thread>
+#include <chrono>
+#include "QuasarML.h"
+// Include operator overloads for shared_ptr<Tensor>
+#include <Core/TensorOps.h>
 
-    using namespace QuasarML;
+using namespace QuasarML;
 
-    static bool test_accelerator() {
+static bool test_accelerator() {
         std::cout << "[test_accelerator]\n";
         Accelerator acc("UnitTestAccel");
         bool ok = acc.is_valid();
@@ -222,6 +226,58 @@ void main() {
         std::cout << "  batch recording exception (skipping): " << e.what() << "\n";
         return true;
     }
+}
+
+// New test: intentionally force a shader compile failure and verify Vulkan backend writes GLSL dump to /tmp
+static bool test_shader_compile_dump() {
+    std::cout << "[shader_compile_dump]\n";
+    Accelerator acc("ShaderDump");
+    if (!acc.is_valid()) return false;
+
+    // Force GPU mode for a deterministic path
+    try {
+        acc.set_device_mode(Accelerator::DeviceMode::GPU);
+    } catch (...) { /* ignore if API differs */ }
+
+    // Best-effort: remove old quasar_shader_error_ files so detection is unambiguous
+    try {
+        for (auto &p : std::filesystem::directory_iterator("/tmp")) {
+            const std::string fn = p.path().filename().string();
+            if (fn.rfind("quasar_shader_error_", 0) == 0) {
+                std::error_code ec;
+                std::filesystem::remove(p.path(), ec);
+            }
+        }
+    } catch (...) { /* ignore permission/iterator errors */ }
+
+    const std::string bad_name = "unit_test_invalid_kernel";
+    const std::string bad_glsl = "#version 450\nthis is invalid glsl!!!\n";
+
+    bool compile_failed = false;
+    try {
+        // Try to create/compile the intentionally-bad GLSL. The backend may return nullptr or throw on error.
+        auto k = acc.create_kernel(bad_name, bad_glsl, 1);
+        if (!k || !k->is_valid()) compile_failed = true;
+    } catch (...) {
+        compile_failed = true;
+    }
+
+    // Allow a short delay for the backend thread to flush the dump file
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+
+    bool found = false;
+    try {
+        std::regex pattern(R"(quasar_shader_error_\d+\.glsl)");
+        for (auto &p : std::filesystem::directory_iterator("/tmp")) {
+            const std::string fn = p.path().filename().string();
+            if (std::regex_match(fn, pattern)) { found = true; break; }
+        }
+    } catch (...) { /* ignore */ }
+
+    std::cout << "  compile_failed=" << (compile_failed ? "true" : "false")
+              << " dump_found=" << (found ? "true" : "false") << "\n";
+
+    return compile_failed && found;
 }
 
     int main() {
@@ -505,16 +561,16 @@ void main() {
             if (!acc.is_valid()) return false;
 
             const char* shader = R"(
-    #version 450
-    layout(local_size_x = 64) in;
-    layout(binding = 0) buffer Buf { float data[]; } buf;
-    layout(push_constant) uniform Push { float v; } pc;
-    void main() {
-        uint idx = gl_GlobalInvocationID.x;
-        if (idx >= buf.data.length()) return;
-        buf.data[idx] += pc.v;
-    }
-    )";
+#version 450
+layout(local_size_x = 64) in;
+layout(binding = 0) buffer Buf { float data[]; } buf;
+layout(push_constant) uniform Push { float v; } pc;
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= buf.data.length()) return;
+    buf.data[idx] += pc.v;
+}
+)";
 
             try {
                 auto k = acc.create_kernel("add_push", shader, 1, sizeof(float));
@@ -646,6 +702,9 @@ void main() {
             LOG_INFO("gpu-mode cpu-fallback counter={} => {}", cnt, (final_ok ? "OK" : "FAIL"));
             return final_ok;
         });
+
+        // run the shader-dump test like the other unit tests
+        run("shader_compile_dump", test_shader_compile_dump);
 
         // All-new tests added
         run("more_dtypes_and_utils", test_more_dtypes_and_utils);
