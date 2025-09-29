@@ -23,19 +23,29 @@ The goal is to combine the usability of **NumPy** with the deep learning power o
 
 - Implemented GPU-first non-contiguous slicing using a generic strided-gather compute shader (no CPU fallback).
 - Added N‑D two-pass reductions (sum/mean/min/max) and pow; all Phase 1 functionality now implemented and covered by unit tests.
-- Unit tests: full suite passes locally (15/15) after fixes to view ownership and descriptor handling.
+ - Implemented GPU-first non-contiguous slicing using a generic strided-gather compute shader (no CPU fallback).
+ - Added N‑D two-pass reductions (sum/mean/min/max) and pow; all Phase 1 functionality implemented and covered by unit tests.
+ - Operator overloads for shared_ptr<Tensor> (ergonomic arithmetic) are implemented and tested.
+ - CPU/GPU mode control and instrumentation (CPU-fallback counter) are available and exercised by unit tests.
+ - Vulkan backend writes failing GLSL snippets to /tmp for shader-debug dumps when compilation fails.
+ - Vendor allocators (mimalloc) and Vulkan memory allocator (VMA) are integrated as dependencies.
+ - Unit tests: full suite passes locally (19/19) on the repo I inspected.
 
 ---
 
 ## ✅ Phase 2 — NumPy Parity
 **Goal:** Become a NumPy alternative in C++.  
 
-- [ ] More elementwise ops (exp, log, sin, cos, sqrt, etc.)  
-- [ ] Advanced indexing (boolean masks, fancy indexing)  
- - [x] Matrix operations: matmul, transpose, reshape, flatten  
- - [ ] dot (alias / convenience)  
-- [ ] Random number generation (uniform, normal, Bernoulli)  
-- [ ] I/O basics (save/load tensors from disk, NumPy `.npy` support)  
+ - [x] Basic elementwise ops (add, mul, sub, div)
+ - [x] pow
+ - [x] ReLU (and other small elementwise helpers)
+ - [ ] More elementwise ops (exp, log, sin, cos, sqrt, etc.)
+ - [ ] Advanced indexing (boolean masks, fancy indexing)
+ - [x] Matrix operations: matmul, transpose, reshape, flatten
+	 - note: matmul and transpose have kernel implementations; reshape/flatten exist as zero-copy views.
+ - [ ] dot (alias / convenience)
+ - [ ] Random number generation (uniform, normal, Bernoulli)
+ - [ ] I/O basics (save/load tensors from disk, file extention ".qsbin" for "Quasar Binary")
 
 ---
 
@@ -66,9 +76,12 @@ The goal is to combine the usability of **NumPy** with the deep learning power o
 
  - [x] Vulkan kernel library (optimized shaders for ops)  
 - [ ] Kernel fusion (combine multiple ops into one dispatch)  
-- [ ] Mixed precision support (FP16, BF16)  
-- [ ] Memory pool / caching (avoid malloc/free overhead)  
-- [ ] Multi-GPU support (basic)  
+ - [ ] Kernel fusion (combine multiple ops into one dispatch)  
+ - [ ] Mixed precision support (FP16, BF16)  
+	 - note: FP16 (F16) has explicit handling in several ops; BF16 support not present.
+ - [ ] Memory pool / caching (avoid malloc/free overhead)  
+	 - note: allocator/backends include mimalloc and VMA (vendor libs are integrated), but there is no QuasarML-specific pooled allocator yet.
+ - [ ] Multi-GPU support (basic)  
 
 ---
 

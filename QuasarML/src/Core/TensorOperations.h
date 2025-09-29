@@ -39,10 +39,18 @@ public:
     
     // Activation functions
     std::shared_ptr<Tensor> relu(std::shared_ptr<Tensor> tensor);
+    // Elementwise math
+    std::shared_ptr<Tensor> exp(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> log(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> sin(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> cos(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> sqrt(std::shared_ptr<Tensor> tensor);
     
     // Linear algebra operations
     std::shared_ptr<Tensor> matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
     std::shared_ptr<Tensor> transpose(std::shared_ptr<Tensor> tensor);
+    // convenience alias
+    std::shared_ptr<Tensor> dot(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
     
     // Reduction operations
     std::shared_ptr<Tensor> sum_axis(std::shared_ptr<Tensor> tensor, u32 axis);
@@ -55,6 +63,15 @@ public:
 
     // Simple slicing (returns a new tensor with copied data)
     std::shared_ptr<Tensor> slice(std::shared_ptr<Tensor> tensor, const std::vector<u32>& start, const std::vector<u32>& lengths);
+
+    // Random number generation (CPU-backed currently). Returns tensors in DataType::F32 unless noted.
+    std::shared_ptr<Tensor> random_uniform(const std::vector<u32>& shape, DataType dtype = DataType::F32, float low = 0.0f, float high = 1.0f);
+    std::shared_ptr<Tensor> random_normal(const std::vector<u32>& shape, DataType dtype = DataType::F32, float mean = 0.0f, float stddev = 1.0f);
+    std::shared_ptr<Tensor> bernoulli(const std::vector<u32>& shape, float p = 0.5f);
+
+    // I/O: simple binary save/load (".qsbin"). Load returns a host-visible tensor.
+    void save_tensor(std::shared_ptr<Tensor> tensor, const std::string& path) const;
+    std::shared_ptr<Tensor> load_tensor(const std::string& path);
 
 private:
     void validate_tensor_op_compatibility(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) const;

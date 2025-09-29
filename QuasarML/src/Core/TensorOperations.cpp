@@ -7,6 +7,9 @@
 #include <array>
 #include <cstdint>
 #include <utility>
+#include <random>
+#include <cmath>
+#include <fstream>
 
 namespace QuasarML {
 
@@ -813,7 +816,7 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
     // partials layout: out_count * group_count
     u64 out_count = calculate_element_count(out_shape);
     u64 partials_count = static_cast<u64>(out_count) * static_cast<u64>(group_count);
-    auto partials = _accelerator.create_tensor(nullptr, {static_cast<u32>(partials_count)}, dtype, true);
+    auto partials = _accelerator.create_tensor({static_cast<u32>(partials_count)}, dtype, true);
 
     // first pass kernel
     std::string k1_name = get_kernel_name_for_dtype("reduce_first_pass_sum", dtype);
@@ -881,7 +884,7 @@ std::shared_ptr<Tensor> TensorOperations::min_axis(std::shared_ptr<Tensor> tenso
     u32 group_count = (red_len + group_size - 1)/group_size;
     u64 out_count = calculate_element_count(out_shape);
     u64 partials_count = out_count * static_cast<u64>(group_count);
-    auto partials = _accelerator.create_tensor(nullptr, {static_cast<u32>(partials_count)}, dtype, true);
+    auto partials = _accelerator.create_tensor({static_cast<u32>(partials_count)}, dtype, true);
 
     std::string k1_name_min = get_kernel_name_for_dtype("reduce_first_pass_min", dtype);
     std::string k1_src_min = generate_reduce_axis_first_pass_kernel_source(dtype, "min", LOCAL);
@@ -938,7 +941,7 @@ std::shared_ptr<Tensor> TensorOperations::max_axis(std::shared_ptr<Tensor> tenso
     u32 group_count2 = (red_len2 + group_size2 - 1)/group_size2;
     u64 out_count2 = calculate_element_count(out_shape);
     u64 partials_count2 = out_count2 * static_cast<u64>(group_count2);
-    auto partials2 = _accelerator.create_tensor(nullptr, {static_cast<u32>(partials_count2)}, dtype, true);
+    auto partials2 = _accelerator.create_tensor({static_cast<u32>(partials_count2)}, dtype, true);
 
     std::string k1_name_max = get_kernel_name_for_dtype("reduce_first_pass_max", dtype);
     std::string k1_src_max = generate_reduce_axis_first_pass_kernel_source(dtype, "max", LOCAL2);
@@ -1010,6 +1013,164 @@ std::shared_ptr<Tensor> TensorOperations::pow(std::shared_ptr<Tensor> a, std::sh
     u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(a->get_element_count()));
     _accelerator.execute(kernel, {a, b, result}, dispatch_size);
     return result;
+}
+
+// New elementwise math ops
+std::shared_ptr<Tensor> TensorOperations::exp(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for exp");
+        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::exp(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    std::string kernel_name = get_kernel_name_for_dtype("exp", dtype);
+    std::string glsl = generate_elementwise_kernel_source("exp(data_in[index])", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+std::shared_ptr<Tensor> TensorOperations::log(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for log");
+        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::log(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    std::string kernel_name = get_kernel_name_for_dtype("log", dtype);
+    std::string glsl = generate_elementwise_kernel_source("log(data_in[index])", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+std::shared_ptr<Tensor> TensorOperations::sin(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for sin");
+        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::sin(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    std::string kernel_name = get_kernel_name_for_dtype("sin", dtype);
+    std::string glsl = generate_elementwise_kernel_source("sin(data_in[index])", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+std::shared_ptr<Tensor> TensorOperations::cos(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for cos");
+        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::cos(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    std::string kernel_name = get_kernel_name_for_dtype("cos", dtype);
+    std::string glsl = generate_elementwise_kernel_source("cos(data_in[index])", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+std::shared_ptr<Tensor> TensorOperations::sqrt(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for sqrt");
+        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::sqrt(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
+    }
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    std::string kernel_name = get_kernel_name_for_dtype("sqrt", dtype);
+    std::string glsl = generate_elementwise_kernel_source("sqrt(data_in[index])", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+// dot convenience: alias to matmul for 1D/2D combinations where appropriate
+std::shared_ptr<Tensor> TensorOperations::dot(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
+    if (!a || !b) throw std::invalid_argument("Tensors cannot be null");
+    if (a->get_rank() == 1 && b->get_rank() == 1) {
+        // inner product -> result scalar (shape {1}) implemented as matmul of (1,K) x (K,1)
+        std::vector<u32> A_shape = {1, a->get_shape()[0]};
+        std::vector<u32> B_shape = {b->get_shape()[0], 1};
+        auto a2 = a->create_view_with_shape(A_shape);
+        auto b2 = b->create_view_with_shape(B_shape);
+        auto r = matmul(a2, b2);
+        // produce scalar tensor (shape {}) keep as 1-element tensor
+        return r;
+    }
+    if (a->get_rank() == 2 && b->get_rank() == 2) {
+        return matmul(a, b);
+    }
+    // fallback: attempt matmul where shapes are compatible
+    return matmul(a, b);
+}
+
+// Random generators - CPU-only, create host-visible tensors
+std::shared_ptr<Tensor> TensorOperations::random_uniform(const std::vector<u32>& shape, DataType dtype, float low, float high) {
+    if (dtype != DataType::F32) throw std::invalid_argument("random_uniform currently supports F32 only");
+    u64 count = calculate_element_count(shape);
+    std::vector<float> buf(count);
+    std::random_device rd; std::mt19937 gen(rd()); std::uniform_real_distribution<float> dist(low, high);
+    for (u64 i=0;i<count;++i) buf[i] = dist(gen);
+    return _accelerator.create_tensor(buf.data(), shape, dtype, /*device_only=*/false);
+}
+
+std::shared_ptr<Tensor> TensorOperations::random_normal(const std::vector<u32>& shape, DataType dtype, float mean, float stddev) {
+    if (dtype != DataType::F32) throw std::invalid_argument("random_normal currently supports F32 only");
+    u64 count = calculate_element_count(shape);
+    std::vector<float> buf(count);
+    std::random_device rd; std::mt19937 gen(rd()); std::normal_distribution<float> dist(mean, stddev);
+    for (u64 i=0;i<count;++i) buf[i] = dist(gen);
+    return _accelerator.create_tensor(buf.data(), shape, dtype, /*device_only=*/false);
+}
+
+std::shared_ptr<Tensor> TensorOperations::bernoulli(const std::vector<u32>& shape, float p) {
+    u64 count = calculate_element_count(shape);
+    std::vector<u8> buf(count);
+    std::random_device rd; std::mt19937 gen(rd()); std::bernoulli_distribution dist(p);
+    for (u64 i=0;i<count;++i) buf[i] = static_cast<u8>(dist(gen) ? 1 : 0);
+    return _accelerator.create_tensor(buf.data(), shape, DataType::U8, /*device_only=*/false);
+}
+
+// Simple binary format: header magic '.qsbin' (6 bytes), dtype (u32), rank (u32), dims..., raw bytes
+void TensorOperations::save_tensor(std::shared_ptr<Tensor> tensor, const std::string& path) const {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    std::ofstream ofs(path, std::ios::binary);
+    if (!ofs) throw std::runtime_error("Failed to open file for writing: " + path);
+    const char magic[6] = {'.','q','s','b','i','n'}; ofs.write(magic, 6);
+    u32 dt = static_cast<u32>(tensor->get_dtype()); ofs.write(reinterpret_cast<const char*>(&dt), sizeof(u32));
+    u32 rank = static_cast<u32>(tensor->get_shape().size()); ofs.write(reinterpret_cast<const char*>(&rank), sizeof(u32));
+    for (u32 d : tensor->get_shape()) ofs.write(reinterpret_cast<const char*>(&d), sizeof(u32));
+    u64 bytes = tensor->get_size_bytes(); std::vector<u8> buf(bytes); tensor->download_data(buf.data()); ofs.write(reinterpret_cast<const char*>(buf.data()), bytes);
+}
+
+std::shared_ptr<Tensor> TensorOperations::load_tensor(const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) throw std::runtime_error("Failed to open file for reading: " + path);
+    char magic[6]; ifs.read(magic,6); if (magic[0]!='.' || magic[1]!='q' || magic[2]!='s' || magic[3]!='b' || magic[4]!='i' || magic[5]!='n') throw std::runtime_error("Not a .qsbin file");
+    u32 dt; ifs.read(reinterpret_cast<char*>(&dt), sizeof(u32)); DataType dtype = static_cast<DataType>(dt);
+    u32 rank; ifs.read(reinterpret_cast<char*>(&rank), sizeof(u32)); std::vector<u32> shape(rank);
+    for (u32 i=0;i<rank;++i) ifs.read(reinterpret_cast<char*>(&shape[i]), sizeof(u32));
+    u64 bytes = calculate_element_count(shape) * get_dtype_size(dtype);
+    std::vector<u8> buf(bytes); ifs.read(reinterpret_cast<char*>(buf.data()), bytes);
+    // create host-visible tensor
+    return _accelerator.create_tensor(buf.data(), shape, dtype, /*device_only=*/false);
 }
 
 std::shared_ptr<Tensor> TensorOperations::slice(std::shared_ptr<Tensor> tensor, const std::vector<u32>& start, const std::vector<u32>& lengths) {
