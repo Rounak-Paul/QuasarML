@@ -15,7 +15,8 @@ using namespace QuasarML;
 
 static bool test_accelerator() {
         std::cout << "[test_accelerator]\n";
-        Accelerator acc("UnitTestAccel");
+        // Test that lazy-initialized accelerator works
+        auto& acc = qsml::accelerator();
         bool ok = acc.is_valid();
         std::cout << "  is_valid: " << ok << "\n";
         return ok;
@@ -23,27 +24,21 @@ static bool test_accelerator() {
 
     static bool test_tensor_float_add() {
         std::cout << "[test_tensor_float_add]\n";
-        Accelerator acc("UnitTestTensor");
-        if (!acc.is_valid()) {
-            std::cerr << "  Accelerator invalid\n";
-            return false;
-        }
-
-
+        
         std::vector<float> a = {1.0f, 2.0f, 3.0f, 4.0f};
         std::vector<float> b = {10.0f, 20.0f, 30.0f, 40.0f};
 
-        auto ta = acc.create_tensor(a.data(), {4}, DataType::F32);
-        auto tb = acc.create_tensor(b.data(), {4}, DataType::F32);
+        auto ta = qsml::from_data(a.data(), {4}, DataType::F32);
+        auto tb = qsml::from_data(b.data(), {4}, DataType::F32);
 
         if (!ta || !tb) {
             std::cerr << "  Failed to create tensors\n";
             return false;
         }
 
-        auto tc = acc.ops().add(ta, tb);
+        auto tc = qsml::add(ta, tb);
         if (!tc) {
-            std::cerr << "  ops().add returned null\n";
+            std::cerr << "  add returned null\n";
             return false;
         }
 
@@ -71,25 +66,23 @@ static bool test_batch_recording_and_memory_barrier();
 // Definitions
 static bool test_more_dtypes_and_utils() {
     std::cout << "[test_more_dtypes_and_utils]\n";
-    Accelerator acc("DtypeUtils");
-    if (!acc.is_valid()) return false;
 
     bool ok = true;
     // Try F16 if supported (may be emulated)
     try {
         std::vector<uint16_t> f16 = {0x3C00, 0x4000}; // 1.0, 2.0 in IEEE 754 half
-        auto t_f16 = acc.create_tensor(f16.data(), {2}, DataType::F16);
+        auto t_f16 = qsml::from_data(f16.data(), {2}, DataType::F16);
         if (!t_f16) ok = false;
         else if (t_f16->get_element_size() != get_dtype_size(DataType::F16)) ok = false;
     } catch (...) { ok = ok && true; }
 
     // unsigned/smaller ints
     std::vector<uint16_t> u16 = {1, 2};
-    auto t_u16 = acc.create_tensor(u16.data(), {2}, DataType::U16);
+    auto t_u16 = qsml::from_data(u16.data(), {2}, DataType::U16);
     if (!t_u16 || t_u16->get_element_size() != get_dtype_size(DataType::U16)) ok = false;
 
     std::vector<uint8_t> u8 = {1, 2};
-    auto t_u8 = acc.create_tensor(u8.data(), {2}, DataType::U8);
+    auto t_u8 = qsml::from_data(u8.data(), {2}, DataType::U8);
     if (!t_u8 || t_u8->get_element_size() != get_dtype_size(DataType::U8)) ok = false;
 
     std::cout << "  more dtypes => " << (ok ? "OK" : "FAIL") << "\n";
@@ -98,17 +91,15 @@ static bool test_more_dtypes_and_utils() {
 
 static bool test_broadcast_and_reduction() {
     std::cout << "[test_broadcast_and_reduction]\n";
-    Accelerator acc("Broadcast");
-    if (!acc.is_valid()) return false;
 
     // a: shape [2,1], b: shape [1,3] -> broadcast to [2,3]
     std::vector<float> a = {1.0f, 2.0f}; // shape 2x1
     std::vector<float> b = {10.0f, 20.0f, 30.0f}; // shape 1x3
-    auto ta = acc.create_tensor(a.data(), {2,1}, DataType::F32);
-    auto tb = acc.create_tensor(b.data(), {1,3}, DataType::F32);
+    auto ta = qsml::from_data(a.data(), {2,1}, DataType::F32);
+    auto tb = qsml::from_data(b.data(), {1,3}, DataType::F32);
     if (!ta || !tb) return false;
 
-    auto tsum = acc.ops().add(ta, tb); // should broadcast
+    auto tsum = qsml::add(ta, tb); // should broadcast
     if (!tsum) return false;
     std::vector<float> out(6);
     tsum->download_data(out.data());
@@ -116,7 +107,7 @@ static bool test_broadcast_and_reduction() {
     bool ok = (std::fabs(out[0]-11.0f)<1e-4f) && (std::fabs(out[5]-32.0f)<1e-4f);
 
     // test sum_axis reduce over axis 1 (columns) producing shape [2]
-    auto reduced = acc.ops().sum_axis(tsum, 1);
+    auto reduced = qsml::sum_axis(tsum, 1);
     if (!reduced) return false;
     std::vector<float> r(2);
     reduced->download_data(r.data());
@@ -129,12 +120,10 @@ static bool test_broadcast_and_reduction() {
 
 static bool test_transpose_and_reshape_views() {
     std::cout << "[test_transpose_and_reshape_views] (safe checks only)\n";
-    Accelerator acc("Transpose");
-    if (!acc.is_valid()) return false;
 
     // create 2x3 tensor and verify safe utilities: shape, element count, dtype, info string
     std::vector<float> A = {1,2,3,4,5,6};
-    auto t = acc.create_tensor(A.data(), {2,3}, DataType::F32);
+    auto t = qsml::from_data(A.data(), {2,3}, DataType::F32);
     if (!t) return false;
 
     auto shape = t->get_shape();
@@ -150,15 +139,13 @@ static bool test_transpose_and_reshape_views() {
 
 static bool test_error_handling_and_edgecases() {
     std::cout << "[test_error_handling_and_edgecases]\n";
-    Accelerator acc("ErrorEdge");
-    if (!acc.is_valid()) return false;
 
     bool ok = true;
     // mismatched shape addition should either return null or throw; accept either
     try {
-        auto a = acc.create_tensor(std::vector<float>{1,2}.data(), {2}, DataType::F32);
-        auto b = acc.create_tensor(std::vector<float>{1,2,3}.data(), {3}, DataType::F32);
-        auto r = acc.ops().add(a,b);
+        auto a = qsml::from_data(std::vector<float>{1,2}.data(), {2}, DataType::F32);
+        auto b = qsml::from_data(std::vector<float>{1,2,3}.data(), {3}, DataType::F32);
+        auto r = qsml::add(a,b);
         if (r) { // if returned tensor, that's unexpected
             std::vector<float> out(r->get_element_count());
             r->download_data(out.data());
@@ -170,7 +157,7 @@ static bool test_error_handling_and_edgecases() {
 
     // empty shape creation should be rejected or invalid
     try {
-        auto e = acc.create_tensor(std::vector<u32>{}.data(), {}, DataType::F32);
+        auto e = qsml::from_data(std::vector<u32>{}.data(), {}, DataType::F32);
         if (e && e->is_valid()) ok = false;
     } catch (...) { ok = ok && true; }
 
@@ -178,10 +165,216 @@ static bool test_error_handling_and_edgecases() {
     return ok;
 }
 
+static bool test_new_tensor_operations() {
+    std::cout << "[test_new_tensor_operations]\n";
+
+    bool ok = true;
+
+    // Test 1: Sigmoid activation
+    std::cout << "  Testing sigmoid...";
+    try {
+        std::vector<float> data = {-2.0f, -1.0f, 0.0f, 1.0f, 2.0f};
+        auto t = qsml::from_data(data.data(), {5}, DataType::F32);
+        auto result = qsml::sigmoid(t);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(5);
+            result->download_data(out.data());
+            // sigmoid(0) should be ~0.5
+            if (std::fabs(out[2] - 0.5f) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 2: Tanh activation
+    std::cout << "  Testing tanh...";
+    try {
+        std::vector<float> data = {-1.0f, 0.0f, 1.0f};
+        auto t = qsml::from_data(data.data(), {3}, DataType::F32);
+        auto result = qsml::tanh(t);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(3);
+            result->download_data(out.data());
+            // tanh(0) should be 0
+            if (std::fabs(out[1]) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 3: Softmax
+    std::cout << "  Testing softmax...";
+    try {
+        std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+        auto t = qsml::from_data(data.data(), {4}, DataType::F32);
+        auto result = qsml::softmax(t, 0);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(4);
+            result->download_data(out.data());
+            // Sum should be ~1.0
+            float sum = 0.0f;
+            for (auto v : out) sum += v;
+            if (std::fabs(sum - 1.0f) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 4: Abs
+    std::cout << "  Testing abs...";
+    try {
+        std::vector<float> data = {-3.0f, -1.0f, 0.0f, 1.0f, 3.0f};
+        auto t = qsml::from_data(data.data(), {5}, DataType::F32);
+        auto result = qsml::abs(t);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(5);
+            result->download_data(out.data());
+            // abs(-3) = 3
+            if (std::fabs(out[0] - 3.0f) > 0.01f || std::fabs(out[1] - 1.0f) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 5: Neg
+    std::cout << "  Testing neg...";
+    try {
+        std::vector<float> data = {1.0f, -2.0f, 3.0f};
+        auto t = qsml::from_data(data.data(), {3}, DataType::F32);
+        auto result = qsml::neg(t);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(3);
+            result->download_data(out.data());
+            // -1 = -1, -(-2) = 2
+            if (std::fabs(out[0] + 1.0f) > 0.01f || std::fabs(out[1] - 2.0f) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 6: Clamp
+    std::cout << "  Testing clamp...";
+    try {
+        std::vector<float> data = {-5.0f, -1.0f, 0.0f, 1.0f, 5.0f};
+        auto t = qsml::from_data(data.data(), {5}, DataType::F32);
+        auto result = qsml::clamp(t, -2.0f, 2.0f);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            std::vector<float> out(5);
+            result->download_data(out.data());
+            // -5 clamped to -2, 5 clamped to 2
+            if (std::fabs(out[0] + 2.0f) > 0.01f || std::fabs(out[4] - 2.0f) > 0.01f) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 7: Squeeze
+    std::cout << "  Testing squeeze...";
+    try {
+        std::vector<float> data = {1.0f, 2.0f, 3.0f};
+        auto t = qsml::from_data(data.data(), {1, 3, 1}, DataType::F32);
+        auto result = qsml::squeeze(t, -1); // squeeze all dims of size 1
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            auto shape = result->get_shape();
+            // Should be [3]
+            if (shape.size() != 1 || shape[0] != 3) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 8: Unsqueeze
+    std::cout << "  Testing unsqueeze...";
+    try {
+        std::vector<float> data = {1.0f, 2.0f, 3.0f};
+        auto t = qsml::from_data(data.data(), {3}, DataType::F32);
+        auto result = qsml::unsqueeze(t, 0);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            auto shape = result->get_shape();
+            // Should be [1, 3]
+            if (shape.size() != 2 || shape[0] != 1 || shape[1] != 3) { ok = false; std::cout << "FAIL\n"; }
+            else std::cout << "OK\n";
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 9: Permute (transpose generalization)
+    std::cout << "  Testing permute...";
+    try {
+        std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+        auto t = qsml::from_data(data.data(), {2, 3}, DataType::F32);
+        // Permute [0,1] -> [1,0] is same as transpose
+        auto result = qsml::permute(t, {1, 0});
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            auto shape = result->get_shape();
+            // Should be [3, 2]
+            if (shape.size() != 2 || shape[0] != 3 || shape[1] != 2) { ok = false; std::cout << "FAIL (shape)\n"; }
+            else {
+                std::vector<float> out(6);
+                result->download_data(out.data());
+                // First element should still be 1, but layout changed
+                if (std::fabs(out[0] - 1.0f) > 0.01f) { ok = false; std::cout << "FAIL (value)\n"; }
+                else std::cout << "OK\n";
+            }
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 10: Concatenate
+    std::cout << "  Testing concatenate...";
+    try {
+        std::vector<float> data1 = {1.0f, 2.0f};
+        std::vector<float> data2 = {3.0f, 4.0f};
+        auto t1 = qsml::from_data(data1.data(), {2}, DataType::F32);
+        auto t2 = qsml::from_data(data2.data(), {2}, DataType::F32);
+        auto result = qsml::concatenate({t1, t2}, 0);
+        if (!result) { ok = false; std::cout << "FAIL (null)\n"; }
+        else {
+            auto shape = result->get_shape();
+            // Should be [4]
+            if (shape.size() != 1 || shape[0] != 4) { ok = false; std::cout << "FAIL (shape)\n"; }
+            else {
+                std::vector<float> out(4);
+                result->download_data(out.data());
+                // Should be [1, 2, 3, 4]
+                if (std::fabs(out[0] - 1.0f) > 0.01f || std::fabs(out[3] - 4.0f) > 0.01f) { ok = false; std::cout << "FAIL (value)\n"; }
+                else std::cout << "OK\n";
+            }
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    // Test 11: Split
+    std::cout << "  Testing split...";
+    try {
+        std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
+        auto t = qsml::from_data(data.data(), {4}, DataType::F32);
+        auto results = qsml::split(t, 2, 0);
+        if (results.size() != 2) { ok = false; std::cout << "FAIL (count)\n"; }
+        else {
+            bool sizes_ok = true;
+            for (auto& r : results) {
+                if (!r || r->get_element_count() != 2) { sizes_ok = false; break; }
+            }
+            if (!sizes_ok) { ok = false; std::cout << "FAIL (sizes)\n"; }
+            else {
+                std::vector<float> out1(2), out2(2);
+                results[0]->download_data(out1.data());
+                results[1]->download_data(out2.data());
+                // First split: [1, 2], second: [3, 4]
+                std::cout << " [got: " << out1[0] << "," << out1[1] << " | " << out2[0] << "," << out2[1] << " expected: 1,2 | 3,4] ";
+                if (std::fabs(out1[0] - 1.0f) > 0.01f || std::fabs(out2[0] - 3.0f) > 0.01f) { ok = false; std::cout << "FAIL (values)\n"; }
+                else std::cout << "OK\n";
+            }
+        }
+    } catch (...) { ok = false; std::cout << "FAIL (exception)\n"; }
+
+    std::cout << "  new tensor operations => " << (ok ? "OK" : "FAIL") << "\n";
+    return ok;
+}
+
 static bool test_batch_recording_and_memory_barrier() {
     std::cout << "[test_batch_recording_and_memory_barrier]\n";
-    Accelerator acc("BatchRecord");
-    if (!acc.is_valid()) return false;
+    auto& acc = qsml::accelerator();
 
     // small kernel to increment an element using push constant
     const char* shader = R"(
@@ -204,7 +397,7 @@ void main() {
         }
 
         std::vector<float> data = {0,0,0,0,0,0,0,0};
-        auto t = acc.create_tensor(data.data(), {static_cast<u32>(data.size())}, DataType::F32);
+        auto t = qsml::from_data(data.data(), {static_cast<u32>(data.size())}, DataType::F32);
         if (!t) return false;
 
         acc.begin_recording();
@@ -231,8 +424,7 @@ void main() {
 // New test: intentionally force a shader compile failure and verify Vulkan backend writes GLSL dump to /tmp
 static bool test_shader_compile_dump() {
     std::cout << "[shader_compile_dump]\n";
-    Accelerator acc("ShaderDump");
-    if (!acc.is_valid()) return false;
+    auto& acc = qsml::accelerator();
 
     // Force GPU mode for a deterministic path
     try {
@@ -295,27 +487,25 @@ static bool test_shader_compile_dump() {
         // New expanded tests
         run("tensor_dtype_coverage", []() {
             std::cout << "[tensor_dtype_coverage]\n";
-            Accelerator acc("DtypeTest");
-            if (!acc.is_valid()) return false;
 
             bool ok = true;
             // float32
-            auto t_f32 = acc.create_tensor(std::vector<float>{1.0f, 2.0f}.data(), {2}, DataType::F32);
+            auto t_f32 = qsml::from_data(std::vector<float>{1.0f, 2.0f}.data(), {2}, DataType::F32);
             if (!t_f32 || t_f32->get_element_size() != get_dtype_size(DataType::F32)) ok = false;
 
             // int32
             std::vector<int32_t> vi = {1, 2};
-            auto t_i32 = acc.create_tensor(vi.data(), {2}, DataType::I32);
+            auto t_i32 = qsml::from_data(vi.data(), {2}, DataType::I32);
             if (!t_i32 || t_i32->get_element_size() != get_dtype_size(DataType::I32)) ok = false;
 
             // uint32
             std::vector<uint32_t> vu = {1u, 2u};
-            auto t_u32 = acc.create_tensor(vu.data(), {2}, DataType::U32);
+            auto t_u32 = qsml::from_data(vu.data(), {2}, DataType::U32);
             if (!t_u32 || t_u32->get_element_size() != get_dtype_size(DataType::U32)) ok = false;
 
             // int8
             std::vector<int8_t> vi8 = {1, 2};
-            auto t_i8 = acc.create_tensor(vi8.data(), {2}, DataType::I8);
+            auto t_i8 = qsml::from_data(vi8.data(), {2}, DataType::I8);
             if (!t_i8 || t_i8->get_element_size() != get_dtype_size(DataType::I8)) ok = false;
 
             std::cout << "  dtype coverage: " << (ok ? "OK" : "FAIL") << "\n";
@@ -324,13 +514,11 @@ static bool test_shader_compile_dump() {
 
         run("operator_overloads", []() {
             std::cout << "[operator_overloads]\n";
-            Accelerator acc("OpOverload");
-            if (!acc.is_valid()) return false;
 
             std::vector<float> a = {1.0f, 2.0f};
             std::vector<float> b = {3.0f, 4.0f};
-            auto ta = acc.create_tensor(a.data(), {2}, DataType::F32);
-            auto tb = acc.create_tensor(b.data(), {2}, DataType::F32);
+            auto ta = qsml::from_data(a.data(), {2}, DataType::F32);
+            auto tb = qsml::from_data(b.data(), {2}, DataType::F32);
             if (!ta || !tb) return false;
 
             // use operator+ defined for shared_ptr<Tensor>
@@ -345,8 +533,7 @@ static bool test_shader_compile_dump() {
 
         run("cpu_gpu_mode_switch", []() {
             std::cout << "[cpu_gpu_mode_switch]\n";
-            Accelerator acc("ModeSwitch");
-            if (!acc.is_valid()) return false;
+            auto& acc = qsml::accelerator();
 
             // ensure GPU-preferred path: reset counter and force GPU
             acc.reset_cpu_fallback_count();
@@ -355,10 +542,10 @@ static bool test_shader_compile_dump() {
             // perform an op that could fall back if GPU unsupported
             std::vector<float> a = {1.0f, 2.0f};
             std::vector<float> b = {3.0f, 4.0f};
-            auto ta = acc.create_tensor(a.data(), {2}, DataType::F32);
-            auto tb = acc.create_tensor(b.data(), {2}, DataType::F32);
+            auto ta = qsml::from_data(a.data(), {2}, DataType::F32);
+            auto tb = qsml::from_data(b.data(), {2}, DataType::F32);
             if (!ta || !tb) return false;
-            auto tc = acc.ops().add(ta, tb);
+            auto tc = qsml::add(ta, tb);
             if (!tc) return false;
 
             // when GPU forced, we expect CPU fallback count to be zero (no unexpected CPU compute)
@@ -366,7 +553,7 @@ static bool test_shader_compile_dump() {
 
             // Now force CPU and perform same op; counter should increase
             acc.set_device_mode(Accelerator::DeviceMode::CPU);
-            auto tc2 = acc.ops().add(ta, tb);
+            auto tc2 = qsml::add(ta, tb);
             if (!tc2) return false;
             u32 cnt_cpu = acc.get_cpu_fallback_count();
 
@@ -377,18 +564,17 @@ static bool test_shader_compile_dump() {
 
         run("cpu_gpu_broadcast_dtype_check", []() {
             std::cout << "[cpu_gpu_broadcast_dtype_check]\n";
-            Accelerator acc("ModeBroadcast");
-            if (!acc.is_valid()) return false;
+            auto& acc = qsml::accelerator();
 
             acc.reset_cpu_fallback_count();
             // force CPU and test broadcast on an integer dtype
             acc.set_device_mode(Accelerator::DeviceMode::CPU);
             std::vector<int32_t> ai = {1, 2}; // shape [2,1]
             std::vector<int32_t> bi = {10, 20, 30}; // shape [1,3]
-            auto ta = acc.create_tensor(ai.data(), {2,1}, DataType::I32);
-            auto tb = acc.create_tensor(bi.data(), {1,3}, DataType::I32);
+            auto ta = qsml::from_data(ai.data(), {2,1}, DataType::I32);
+            auto tb = qsml::from_data(bi.data(), {1,3}, DataType::I32);
             if (!ta || !tb) return false;
-            auto tout = acc.ops().add(ta, tb);
+            auto tout = qsml::add(ta, tb);
             if (!tout) return false;
             // cpu fallback must have been used
             u32 cnt = acc.get_cpu_fallback_count();
@@ -399,14 +585,12 @@ static bool test_shader_compile_dump() {
 
         run("scalar_ops", []() {
             std::cout << "[scalar_ops]\n";
-            Accelerator acc("ScalarOps");
-            if (!acc.is_valid()) return false;
             std::vector<float> a = {2.0f, 3.0f};
-            auto ta = acc.create_tensor(a.data(), {2}, DataType::F32);
+            auto ta = qsml::from_data(a.data(), {2}, DataType::F32);
             if (!ta) return false;
 
-            auto t_add = acc.ops().add_scalar(ta, 5.0f);
-            auto t_mul = acc.ops().mul_scalar(ta, 2.0f);
+            auto t_add = qsml::add_scalar(ta, 5.0f);
+            auto t_mul = qsml::mul_scalar(ta, 2.0f);
             if (!t_add || !t_mul) return false;
             std::vector<float> out_add(2), out_mul(2);
             t_add->download_data(out_add.data());
@@ -419,8 +603,6 @@ static bool test_shader_compile_dump() {
 
         run("matmul_small", []() {
             std::cout << "[matmul_small]\n";
-            Accelerator acc("MatMul");
-            if (!acc.is_valid()) return false;
 
             // A = 2x3, B = 3x2 => C = 2x2
             std::vector<float> A = {1, 2, 3,
@@ -428,11 +610,11 @@ static bool test_shader_compile_dump() {
             std::vector<float> B = {7, 8,
                                     9, 10,
                                     11, 12};
-            auto tA = acc.create_tensor(A.data(), {2,3}, DataType::F32);
-            auto tB = acc.create_tensor(B.data(), {3,2}, DataType::F32);
+            auto tA = qsml::from_data(A.data(), {2,3}, DataType::F32);
+            auto tB = qsml::from_data(B.data(), {3,2}, DataType::F32);
             if (!tA || !tB) return false;
 
-            auto tC = acc.ops().matmul(tA, tB);
+            auto tC = qsml::matmul(tA, tB);
             if (!tC) return false;
             std::vector<float> C(4);
             tC->download_data(C.data());
@@ -445,25 +627,23 @@ static bool test_shader_compile_dump() {
 
         run("pow_and_reductions", []() {
             std::cout << "[pow_and_reductions]\n";
-            Accelerator acc("PowReduce");
-            if (!acc.is_valid()) return false;
 
             // pow scalar: [1,2,3] ^ 2 => [1,4,9]
             std::vector<float> a = {1.0f,2.0f,3.0f};
-            auto ta = acc.create_tensor(a.data(), {3}, DataType::F32);
+            auto ta = qsml::from_data(a.data(), {3}, DataType::F32);
             float p = 2.0f;
-            auto tp = acc.create_tensor(&p, {1}, DataType::F32);
-            auto tout = acc.ops().pow(ta, tp);
+            auto tp = qsml::from_data(&p, {1}, DataType::F32);
+            auto tout = qsml::pow(ta, tp);
             if (!tout) return false;
             std::vector<float> out(3); tout->download_data(out.data());
             bool ok = (std::fabs(out[0]-1.0f) < 1e-4f) && (std::fabs(out[2]-9.0f) < 1e-3f);
 
             // min/max/mean along axis for 2x3
             std::vector<float> M = {1,5,3, 4,2,6}; // 2x3
-            auto tM = acc.create_tensor(M.data(), {2,3}, DataType::F32);
-            auto min0 = acc.ops().min_axis(tM, 0); // axis 0 -> shape [3]
-            auto max1 = acc.ops().max_axis(tM, 1); // axis 1 -> shape [2]
-            auto mean0 = acc.ops().mean_axis(tM, 0);
+            auto tM = qsml::from_data(M.data(), {2,3}, DataType::F32);
+            auto min0 = qsml::min_axis(tM, 0); // axis 0 -> shape [3]
+            auto max1 = qsml::max_axis(tM, 1); // axis 1 -> shape [2]
+            auto mean0 = qsml::mean_axis(tM, 0);
             if (!min0 || !max1 || !mean0) return false;
             std::vector<float> vmin(3); min0->download_data(vmin.data());
             std::vector<float> vmax(2); max1->download_data(vmax.data());
@@ -481,13 +661,11 @@ static bool test_shader_compile_dump() {
 
         run("slicing_cpu_copy", []() {
             std::cout << "[slicing_cpu_copy]\n";
-            Accelerator acc("Slice");
-            if (!acc.is_valid()) return false;
             std::vector<float> A = {1,2,3,4,5,6,7,8,9}; // 3x3
-            auto t = acc.create_tensor(A.data(), {3,3}, DataType::F32);
+            auto t = qsml::from_data(A.data(), {3,3}, DataType::F32);
             if (!t) return false;
             // slice rows 0..1, cols 1..2 => start {0,1}, lengths {2,2}
-            auto s = acc.ops().slice(t, {0,1}, {2,2});
+            auto s = qsml::slice(t, {0,1}, {2,2});
             if (!s) return false;
             std::vector<float> out(4); s->download_data(out.data());
             // expected [[2,3],[5,6]] row-major => [2,3,5,6]
@@ -498,8 +676,6 @@ static bool test_shader_compile_dump() {
 
             run("slicing_strided_gpu", []() {
                 std::cout << "[slicing_strided_gpu]\n";
-                Accelerator acc("SliceGPU");
-                if (!acc.is_valid()) return false;
 
                 // 3x4 matrix, test a non-contiguous slice (rows 0..2 step 1, cols 1..3)
                 std::vector<float> A = {
@@ -507,10 +683,10 @@ static bool test_shader_compile_dump() {
                     5, 6, 7, 8,
                     9,10,11,12
                 };
-                auto t = acc.create_tensor(A.data(), {3,4}, DataType::F32);
+                auto t = qsml::from_data(A.data(), {3,4}, DataType::F32);
                 if (!t) return false;
                 // slice start {0,1}, lengths {3,2} -> expected [2,3,6,7,10,11]
-                auto s = acc.ops().slice(t, {0,1}, {3,2});
+                auto s = qsml::slice(t, {0,1}, {3,2});
                 if (!s) return false;
                 std::vector<float> out(6); s->download_data(out.data());
                 bool ok = (std::fabs(out[0]-2.0f) < 1e-4f) && (std::fabs(out[5]-11.0f) < 1e-4f);
@@ -525,10 +701,10 @@ static bool test_shader_compile_dump() {
                     1,2,3, 4,5,6,
                     7,8,9,10,11,12
                 }; // shape 2x2x3
-                auto t3 = acc.create_tensor(B.data(), {2,2,3}, DataType::F32);
+                auto t3 = qsml::from_data(B.data(), {2,2,3}, DataType::F32);
                 if (!t3) return false;
                 // slice start {0,1,1}, lengths {2,1,2} -> pick the last two entries of middle row in each outer
-                auto s3 = acc.ops().slice(t3, {0,1,1}, {2,1,2});
+                auto s3 = qsml::slice(t3, {0,1,1}, {2,1,2});
                 if (!s3) return false;
                 std::vector<float> out3(4); s3->download_data(out3.data());
                 // expected: [5,6,11,12]
@@ -540,9 +716,9 @@ static bool test_shader_compile_dump() {
 
                 // test an integer dtype slice to ensure dtype-agnostic copy (I32)
                 std::vector<int32_t> I = {1,2,3,4,5,6}; // shape 2x3
-                auto ti = acc.create_tensor(I.data(), {2,3}, DataType::I32);
+                auto ti = qsml::from_data(I.data(), {2,3}, DataType::I32);
                 if (!ti) return false;
-                auto si = acc.ops().slice(ti, {0,1}, {2,2});
+                auto si = qsml::slice(ti, {0,1}, {2,2});
                 if (!si) return false;
                 std::vector<int32_t> oi(4); si->download_data(oi.data());
                 bool oki = (oi[0] == 2) && (oi[3] == 6);
@@ -557,8 +733,7 @@ static bool test_shader_compile_dump() {
 
         run("kernel_create_and_optional_execute", []() {
             std::cout << "[kernel_create_and_optional_execute]\n";
-            Accelerator acc("KernelTest");
-            if (!acc.is_valid()) return false;
+            auto& acc = qsml::accelerator();
 
             const char* shader = R"(
 #version 450
@@ -581,7 +756,7 @@ void main() {
 
                 // create small tensor and run kernel
                 std::vector<float> data = {1.0f, 2.0f, 3.0f, 4.0f};
-                auto t = acc.create_tensor(data.data(), {4}, DataType::F32);
+                auto t = qsml::from_data(data.data(), {4}, DataType::F32);
                 if (!t) return false;
                 float push = 2.5f;
                 // dispatch
@@ -601,8 +776,7 @@ void main() {
         // Ensure GPU mode does not trigger CPU fallbacks for the common ops across dtypes
         run("gpu_mode_all_dtypes_ops_no_cpu_fallback", []() {
             std::cout << "[gpu_mode_all_dtypes_ops_no_cpu_fallback]\n";
-            Accelerator acc("GpuDtypeVerify");
-            if (!acc.is_valid()) return false;
+            auto& acc = qsml::accelerator();
 
             acc.reset_cpu_fallback_count();
             acc.set_device_mode(Accelerator::DeviceMode::GPU);
@@ -628,52 +802,52 @@ void main() {
                     switch (dt) {
                         case DataType::F32: {
                             std::vector<float> A{1.0f, -2.0f}; std::vector<float> B{3.0f, 4.0f};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::F16: {
                             // use canonical half encodings for 1.0 and 2.0
                             std::vector<uint16_t> A{0x3C00u, 0xC000u}; // 1.0, -2.0 (half)
                             std::vector<uint16_t> B{0x4000u, 0x4000u}; // 2.0, 2.0
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::I32: {
                             std::vector<int32_t> A{1, -2}; std::vector<int32_t> B{3, 4};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::U32: {
                             std::vector<uint32_t> A{1u, 2u}; std::vector<uint32_t> B{3u, 4u};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::I16: {
                             std::vector<int16_t> A{1, -2}; std::vector<int16_t> B{3, 4};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::U16: {
                             std::vector<uint16_t> A{1u, 2u}; std::vector<uint16_t> B{3u, 4u};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::I8: {
                             std::vector<int8_t> A{1, -2}; std::vector<int8_t> B{3, 4};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         case DataType::U8: {
                             std::vector<uint8_t> A{1u, 2u}; std::vector<uint8_t> B{3u, 4u};
-                            ta = acc.create_tensor(A.data(), {2}, dt);
-                            tb = acc.create_tensor(B.data(), {2}, dt);
+                            ta = qsml::from_data(A.data(), {2}, dt);
+                            tb = qsml::from_data(B.data(), {2}, dt);
                             break;
                         }
                         default: break;
@@ -682,13 +856,13 @@ void main() {
                     if (!ta || !tb) { ok = false; break; }
 
                     // elementwise add and mul should execute on GPU when forced
-                    auto r_add = acc.ops().add(ta, tb);
+                    auto r_add = qsml::add(ta, tb);
                     if (!r_add) { ok = false; break; }
-                    auto r_mul = acc.ops().mul(ta, tb);
+                    auto r_mul = qsml::mul(ta, tb);
                     if (!r_mul) { ok = false; break; }
 
                     // small relu test where meaningful
-                    auto r_relu = acc.ops().relu(ta);
+                    auto r_relu = qsml::relu(ta);
                     if (!r_relu) { ok = false; break; }
 
                 } catch (...) {
@@ -712,6 +886,7 @@ void main() {
         run("transpose_and_reshape_views", test_transpose_and_reshape_views);
         run("error_handling_and_edgecases", test_error_handling_and_edgecases);
         run("batch_recording_and_memory_barrier", test_batch_recording_and_memory_barrier);
+        run("new_tensor_operations", test_new_tensor_operations);
 
         std::cout << "Summary: " << pass << "/" << total << " tests passed\n";
         return (pass == total) ? 0 : 1;

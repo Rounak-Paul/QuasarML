@@ -796,6 +796,7 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
     DataType dtype = tensor->get_dtype();
     auto shape = tensor->get_shape();
     std::vector<u32> out_shape; for (u32 i=0;i<shape.size();++i) if (i!=axis) out_shape.push_back(shape[i]);
+    if (out_shape.empty()) out_shape.push_back(1); // scalar result
     auto result = _accelerator.create_tensor(out_shape, dtype);
 
     u32 max_rank = static_cast<u32>(shape.size());
@@ -929,7 +930,9 @@ std::shared_ptr<Tensor> TensorOperations::max_axis(std::shared_ptr<Tensor> tenso
         return result;
     }
     // two-pass max reduction
-    DataType dtype = tensor->get_dtype(); auto shape = tensor->get_shape(); std::vector<u32> out_shape; for (u32 i=0;i<shape.size();++i) if (i!=axis) out_shape.push_back(shape[i]); auto result = _accelerator.create_tensor(out_shape, dtype);
+    DataType dtype = tensor->get_dtype(); auto shape = tensor->get_shape(); std::vector<u32> out_shape; for (u32 i=0;i<shape.size();++i) if (i!=axis) out_shape.push_back(shape[i]); 
+    if (out_shape.empty()) out_shape.push_back(1); // scalar result
+    auto result = _accelerator.create_tensor(out_shape, dtype);
     u32 max_rank = static_cast<u32>(shape.size()); std::vector<u32> meta; meta.reserve(2+max_rank*4); meta.push_back(max_rank); meta.push_back(axis);
     auto pad_dims2 = [&](const std::vector<u32>& s) { std::vector<u32> padded(max_rank,1u); size_t off=max_rank-s.size(); for(size_t i=0;i<s.size();++i) padded[off+i]=s[i]; return padded; };
     auto in_p2 = pad_dims2(shape); auto out_p2 = pad_dims2(out_shape); auto in_str2 = compute_strides_padded(shape, max_rank); auto out_str2 = compute_strides_padded(out_shape, max_rank);
@@ -1026,7 +1029,7 @@ std::shared_ptr<Tensor> TensorOperations::exp(std::shared_ptr<Tensor> tensor) {
     }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("exp", dtype);
-    std::string glsl = generate_elementwise_kernel_source("exp(data_in[index])", dtype);
+    std::string glsl = generate_activation_kernel_source(dtype, "exp(data_in[index])");
     auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
     u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
     _accelerator.execute(kernel, {tensor, result}, dispatch);
@@ -1171,6 +1174,360 @@ std::shared_ptr<Tensor> TensorOperations::load_tensor(const std::string& path) {
     std::vector<u8> buf(bytes); ifs.read(reinterpret_cast<char*>(buf.data()), bytes);
     // create host-visible tensor
     return _accelerator.create_tensor(buf.data(), shape, dtype, /*device_only=*/false);
+}
+
+// ============================================================================
+// NEW BASIC TENSOR OPERATIONS
+// ============================================================================
+
+// Sigmoid activation: 1 / (1 + exp(-x))
+std::shared_ptr<Tensor> TensorOperations::sigmoid(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    std::string kernel_name = get_kernel_name_for_dtype("sigmoid", dtype);
+    std::string glsl = generate_activation_kernel_source(dtype, "1.0 / (1.0 + exp(-data_in[index]))");
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+// Tanh activation: tanh(x)
+std::shared_ptr<Tensor> TensorOperations::tanh(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    std::string kernel_name = get_kernel_name_for_dtype("tanh", dtype);
+    std::string glsl = generate_activation_kernel_source(dtype, "tanh(data_in[index])");
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+// Softmax: exp(x_i) / sum(exp(x_j)) along specified axis
+std::shared_ptr<Tensor> TensorOperations::softmax(std::shared_ptr<Tensor> tensor, int axis) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    
+    // Normalize axis
+    int rank = static_cast<int>(tensor->get_rank());
+    if (axis < 0) axis += rank;
+    if (axis < 0 || axis >= rank) throw std::invalid_argument("Axis out of range");
+    
+    u32 ax = static_cast<u32>(axis);
+    
+    // Softmax: numerically stable version
+    // 1. Find max along axis (for numerical stability)
+    auto max_vals = max_axis(tensor, ax);
+    
+    // 2. Subtract max (broadcasting)
+    auto shifted = sub(tensor, max_vals);
+    
+    // 3. Compute exp
+    auto exp_vals = exp(shifted);
+    
+    // 4. Sum along axis
+    auto sum_exp = sum_axis(exp_vals, ax);
+    
+    // 5. Divide (broadcasting)
+    auto result = div(exp_vals, sum_exp);
+    
+    return result;
+}
+
+// Absolute value
+std::shared_ptr<Tensor> TensorOperations::abs(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    std::string kernel_name = get_kernel_name_for_dtype("abs", dtype);
+    std::string glsl = generate_activation_kernel_source(dtype, "abs(data_in[index])");
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+// Negation
+std::shared_ptr<Tensor> TensorOperations::neg(std::shared_ptr<Tensor> tensor) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    DataType dtype = tensor->get_dtype();
+    std::string kernel_name = get_kernel_name_for_dtype("neg", dtype);
+    std::string glsl = generate_activation_kernel_source(dtype, "-data_in[index]");
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch);
+    return result;
+}
+
+// Clamp: constrain values between min and max
+std::shared_ptr<Tensor> TensorOperations::clamp(std::shared_ptr<Tensor> tensor, float min_val, float max_val) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    if (min_val > max_val) throw std::invalid_argument("min_val must be <= max_val");
+    
+    DataType dtype = tensor->get_dtype();
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    std::string src = "#version 450\n";
+    src += "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    src += "layout(push_constant) uniform PushConstants { float min_v; float max_v; } pc;\n";
+    src += "layout(set = 0, binding = 0, std430) restrict readonly buffer Input { " + std::string(glsl_type) + " data_in[]; } ;\n";
+    src += "layout(set = 0, binding = 1, std430) restrict writeonly buffer Output { " + std::string(glsl_type) + " data_out[]; } ;\n";
+    src += "void main() {\n";
+    src += "    uint index = gl_GlobalInvocationID.x;\n";
+    src += "    if (index >= data_in.length()) return;\n";
+    src += "    " + std::string(glsl_type) + " val = data_in[index];\n";
+    src += "    data_out[index] = clamp(val, " + std::string(glsl_type) + "(pc.min_v), " + std::string(glsl_type) + "(pc.max_v));\n";
+    src += "}\n";
+    
+    std::string kernel_name = get_kernel_name_for_dtype("clamp", dtype);
+    auto kernel = get_or_create_kernel(kernel_name, src, 2, sizeof(float) * 2);
+    auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
+    
+    struct PushConst { float min_v; float max_v; } pc{min_val, max_val};
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result}, dispatch, 1, 1, &pc);
+    return result;
+}
+
+// Permute: arbitrary dimension reordering (generalized transpose)
+std::shared_ptr<Tensor> TensorOperations::permute(std::shared_ptr<Tensor> tensor, const std::vector<u32>& dims) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    
+    auto shape = tensor->get_shape();
+    u32 rank = tensor->get_rank();
+    
+    if (dims.size() != rank) throw std::invalid_argument("dims must match tensor rank");
+    
+    // Validate dims: must be a permutation of 0..rank-1
+    std::vector<bool> seen(rank, false);
+    for (u32 d : dims) {
+        if (d >= rank) throw std::invalid_argument("Invalid dimension in permutation");
+        if (seen[d]) throw std::invalid_argument("Duplicate dimension in permutation");
+        seen[d] = true;
+    }
+    
+    // Compute output shape
+    std::vector<u32> out_shape(rank);
+    for (u32 i = 0; i < rank; ++i) {
+        out_shape[i] = shape[dims[i]];
+    }
+    
+    DataType dtype = tensor->get_dtype();
+    auto result = _accelerator.create_tensor(out_shape, dtype);
+    
+    // Build metadata: [rank, dims..., in_shape..., out_shape..., in_strides..., out_strides...]
+    auto in_strides = tensor->calculate_strides();
+    auto out_strides = result->calculate_strides();
+    
+    std::vector<u32> meta;
+    meta.push_back(rank);
+    for (u32 d : dims) meta.push_back(d);
+    for (u32 s : shape) meta.push_back(s);
+    for (u32 s : out_shape) meta.push_back(s);
+    for (auto s : in_strides) meta.push_back(static_cast<u32>(s));
+    for (auto s : out_strides) meta.push_back(static_cast<u32>(s));
+    
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
+    
+    std::string kernel_name = get_kernel_name_for_dtype("permute", dtype);
+    std::string glsl = generate_permute_kernel_source(dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 3);
+    
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(result->get_element_count()));
+    _accelerator.execute(kernel, {tensor, result, meta_tensor}, dispatch);
+    
+    return result;
+}
+
+// Concatenate: join tensors along an axis
+std::shared_ptr<Tensor> TensorOperations::concatenate(const std::vector<std::shared_ptr<Tensor>>& tensors, u32 axis) {
+    if (tensors.empty()) throw std::invalid_argument("Cannot concatenate empty tensor list");
+    if (!tensors[0]) throw std::invalid_argument("Tensors cannot be null");
+    
+    u32 rank = tensors[0]->get_rank();
+    if (axis >= rank) throw std::invalid_argument("Axis out of range");
+    
+    auto dtype = tensors[0]->get_dtype();
+    auto first_shape = tensors[0]->get_shape();
+    
+    // Validate all tensors have compatible shapes
+    u32 total_dim = 0;
+    for (const auto& t : tensors) {
+        if (!t || !t->is_valid()) throw std::invalid_argument("All tensors must be valid");
+        if (t->get_dtype() != dtype) throw std::invalid_argument("All tensors must have same dtype");
+        if (t->get_rank() != rank) throw std::invalid_argument("All tensors must have same rank");
+        
+        auto shape = t->get_shape();
+        for (u32 i = 0; i < rank; ++i) {
+            if (i != axis && shape[i] != first_shape[i]) {
+                throw std::invalid_argument("Tensor shapes must match except on concat axis");
+            }
+        }
+        total_dim += shape[axis];
+    }
+    
+    // Compute output shape
+    std::vector<u32> out_shape = first_shape;
+    out_shape[axis] = total_dim;
+    
+    auto result = _accelerator.create_tensor(out_shape, dtype);
+    
+    // GPU kernel approach: support up to 8 input tensors
+    if (tensors.size() > 8) {
+        throw std::invalid_argument("Concatenate supports up to 8 tensors on GPU");
+    }
+    
+    // Build metadata: [num_tensors, axis, rank, out_shape[rank], out_strides[rank], 
+    //                   offset0...offset7, size0...size7, in_strides0[rank]...in_strides7[rank]]
+    std::vector<u32> meta;
+    meta.push_back(static_cast<u32>(tensors.size()));
+    meta.push_back(axis);
+    meta.push_back(rank);
+    
+    // Output shape
+    for (u32 dim : out_shape) meta.push_back(dim);
+    
+    // Output strides
+    auto out_strides = result->calculate_strides();
+    for (auto s : out_strides) meta.push_back(static_cast<u32>(s));
+    
+    // Offsets: cumulative axis offsets for each tensor (pad to 8)
+    u32 offset = 0;
+    for (size_t i = 0; i < 8; ++i) {
+        if (i < tensors.size()) {
+            meta.push_back(offset);
+            offset += tensors[i]->get_shape()[axis];
+        } else {
+            meta.push_back(0);
+        }
+    }
+    
+    // Sizes: axis size for each tensor (pad to 8)
+    for (size_t i = 0; i < 8; ++i) {
+        if (i < tensors.size()) {
+            meta.push_back(tensors[i]->get_shape()[axis]);
+        } else {
+            meta.push_back(1); // dummy value
+        }
+    }
+    
+    // Input strides for each tensor (pad to 8 tensors)
+    for (size_t i = 0; i < 8; ++i) {
+        if (i < tensors.size()) {
+            auto in_strides = tensors[i]->calculate_strides();
+            for (auto s : in_strides) meta.push_back(static_cast<u32>(s));
+        } else {
+            // Pad with dummy strides
+            for (u32 r = 0; r < rank; ++r) meta.push_back(1);
+        }
+    }
+    
+    auto meta_tensor = _accelerator.create_tensor(meta.data(), {static_cast<u32>(meta.size())}, DataType::U32, true);
+    
+    // Prepare tensor list with padding (fill unused slots with first tensor to avoid null buffers)
+    std::vector<std::shared_ptr<Tensor>> padded_tensors = tensors;
+    while (padded_tensors.size() < 8) {
+        padded_tensors.push_back(tensors[0]);
+    }
+    
+    // Execute kernel
+    std::string kernel_name = get_kernel_name_for_dtype("concatenate", dtype);
+    std::string glsl = generate_concatenate_kernel_source(dtype);
+    auto kernel = get_or_create_kernel(kernel_name, glsl, 10); // 8 inputs + 1 output + 1 meta
+    
+    u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(result->get_element_count()));
+    _accelerator.execute(kernel, {padded_tensors[0], padded_tensors[1], padded_tensors[2], padded_tensors[3],
+                                   padded_tensors[4], padded_tensors[5], padded_tensors[6], padded_tensors[7],
+                                   result, meta_tensor}, dispatch);
+    
+    return result;
+}
+
+// Split: divide tensor along an axis into multiple tensors
+std::vector<std::shared_ptr<Tensor>> TensorOperations::split(std::shared_ptr<Tensor> tensor, u32 num_splits, u32 axis) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    
+    auto shape = tensor->get_shape();
+    u32 rank = tensor->get_rank();
+    
+    if (axis >= rank) throw std::invalid_argument("Axis out of range");
+    if (num_splits == 0) throw std::invalid_argument("num_splits must be > 0");
+    if (shape[axis] % num_splits != 0) {
+        throw std::invalid_argument("Axis size must be divisible by num_splits");
+    }
+    
+    u32 split_size = shape[axis] / num_splits;
+    std::vector<std::shared_ptr<Tensor>> results;
+    
+    // Use slice to extract each split
+    for (u32 i = 0; i < num_splits; ++i) {
+        std::vector<u32> start(rank, 0);
+        std::vector<u32> lengths = shape;
+        
+        start[axis] = i * split_size;
+        lengths[axis] = split_size;
+        
+        results.push_back(slice(tensor, start, lengths));
+    }
+    
+    return results;
+}
+
+// Squeeze: remove dimensions of size 1
+std::shared_ptr<Tensor> TensorOperations::squeeze(std::shared_ptr<Tensor> tensor, int axis) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    
+    auto shape = tensor->get_shape();
+    std::vector<u32> new_shape;
+    
+    if (axis == -1) {
+        // Remove all dimensions of size 1
+        for (u32 dim : shape) {
+            if (dim != 1) new_shape.push_back(dim);
+        }
+    } else {
+        // Remove specific axis if it's size 1
+        int rank = static_cast<int>(shape.size());
+        if (axis < 0) axis += rank;
+        if (axis < 0 || axis >= rank) throw std::invalid_argument("Axis out of range");
+        
+        if (shape[axis] != 1) {
+            throw std::invalid_argument("Cannot squeeze axis with size != 1");
+        }
+        
+        for (u32 i = 0; i < shape.size(); ++i) {
+            if (i != static_cast<u32>(axis)) new_shape.push_back(shape[i]);
+        }
+    }
+    
+    // Handle case where all dimensions were 1
+    if (new_shape.empty()) new_shape.push_back(1);
+    
+    // Return a view with the new shape
+    return tensor->create_view_with_shape(new_shape);
+}
+
+// Unsqueeze: add a dimension of size 1
+std::shared_ptr<Tensor> TensorOperations::unsqueeze(std::shared_ptr<Tensor> tensor, u32 axis) {
+    if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
+    
+    auto shape = tensor->get_shape();
+    u32 new_rank = static_cast<u32>(shape.size()) + 1;
+    
+    if (axis > shape.size()) throw std::invalid_argument("Axis out of range");
+    
+    std::vector<u32> new_shape;
+    for (u32 i = 0; i < shape.size(); ++i) {
+        if (i == axis) new_shape.push_back(1);
+        new_shape.push_back(shape[i]);
+    }
+    if (axis == shape.size()) new_shape.push_back(1);
+    
+    // Return a view with the new shape
+    return tensor->create_view_with_shape(new_shape);
 }
 
 std::shared_ptr<Tensor> TensorOperations::slice(std::shared_ptr<Tensor> tensor, const std::vector<u32>& start, const std::vector<u32>& lengths) {
@@ -1777,6 +2134,162 @@ std::string TensorOperations::generate_reduce_axis_second_pass_kernel_source(Dat
     } else if (op == "max") {
         src += "    " + std::string(glsl_type) + " acc = partials[base]; for (uint g = 1u; g < pc.group_count; ++g) acc = max(acc, partials[base + g]); data_out[index] = acc; }\n";
     }
+    return src;
+}
+
+// Helper: generate simple activation kernel (sigmoid, tanh, abs, neg)
+std::string TensorOperations::generate_activation_kernel_source(DataType dtype, const std::string& activation_func) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    std::string src = "#version 450\n";
+    src += "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    src += "layout(set = 0, binding = 0, std430) restrict readonly buffer Input {\n";
+    src += "    " + std::string(glsl_type) + " data_in[];\n";
+    src += "};\n";
+    src += "layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {\n";
+    src += "    " + std::string(glsl_type) + " data_out[];\n";
+    src += "};\n";
+    src += "void main() {\n";
+    src += "    uint index = gl_GlobalInvocationID.x;\n";
+    src += "    if (index >= data_in.length()) return;\n";
+    src += "    data_out[index] = " + std::string(glsl_type) + "(" + activation_func + ");\n";
+    src += "}\n";
+    
+    return src;
+}
+
+// Helper: generate permute kernel
+std::string TensorOperations::generate_permute_kernel_source(DataType dtype) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    std::string src = "#version 450\n";
+    src += "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    src += "layout(set = 0, binding = 0, std430) restrict readonly buffer Input { " + std::string(glsl_type) + " data_in[]; } ;\n";
+    src += "layout(set = 0, binding = 1, std430) restrict writeonly buffer Output { " + std::string(glsl_type) + " data_out[]; } ;\n";
+    src += "layout(set = 0, binding = 2, std430) restrict readonly buffer Meta { uint data[]; } ;\n";
+    src += "void main() {\n";
+    src += "    uint out_idx = gl_GlobalInvocationID.x;\n";
+    src += "    if (out_idx >= data_out.length()) return;\n";
+    src += "    \n";
+    src += "    // Meta layout: [rank, dims..., in_shape..., out_shape..., in_strides..., out_strides...]\n";
+    src += "    uint rank = data[0];\n";
+    src += "    uint dims_off = 1;\n";
+    src += "    uint in_shape_off = dims_off + rank;\n";
+    src += "    uint out_shape_off = in_shape_off + rank;\n";
+    src += "    uint in_strides_off = out_shape_off + rank;\n";
+    src += "    uint out_strides_off = in_strides_off + rank;\n";
+    src += "    \n";
+    src += "    // Decompose output index into coordinates\n";
+    src += "    uint rem = out_idx;\n";
+    src += "    uint coords[16]; // max rank support\n";
+    src += "    for (uint i = 0; i < rank; ++i) {\n";
+    src += "        uint stride = data[out_strides_off + i];\n";
+    src += "        if (stride > 0) {\n";
+    src += "            coords[i] = rem / stride;\n";
+    src += "            rem = rem % stride;\n";
+    src += "        } else {\n";
+    src += "            coords[i] = 0;\n";
+    src += "        }\n";
+    src += "    }\n";
+    src += "    \n";
+    src += "    // Map coordinates through permutation to get input index\n";
+    src += "    uint in_idx = 0;\n";
+    src += "    for (uint i = 0; i < rank; ++i) {\n";
+    src += "        uint out_dim = i;  // which output dimension we're looking at\n";
+    src += "        uint in_dim = data[dims_off + i];  // which input dimension it came from\n";
+    src += "        uint out_coord = coords[out_dim];  // coordinate in output space\n";
+    src += "        // This output coordinate corresponds to input dimension in_dim\n";
+    src += "        uint in_stride = data[in_strides_off + in_dim];\n";
+    src += "        in_idx += out_coord * in_stride;\n";
+    src += "    }\n";
+    src += "    \n";
+    src += "    data_out[out_idx] = data_in[in_idx];\n";
+    src += "}\n";
+    
+    return src;
+}
+
+// Helper: generate concatenate kernel
+std::string TensorOperations::generate_concatenate_kernel_source(DataType dtype) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    std::string src = "#version 450\n";
+    src += "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    src += "layout(set = 0, binding = 0, std430) restrict readonly buffer Input0 { " + std::string(glsl_type) + " data0[]; } ;\n";
+    src += "layout(set = 0, binding = 1, std430) restrict readonly buffer Input1 { " + std::string(glsl_type) + " data1[]; } ;\n";
+    src += "layout(set = 0, binding = 2, std430) restrict readonly buffer Input2 { " + std::string(glsl_type) + " data2[]; } ;\n";
+    src += "layout(set = 0, binding = 3, std430) restrict readonly buffer Input3 { " + std::string(glsl_type) + " data3[]; } ;\n";
+    src += "layout(set = 0, binding = 4, std430) restrict readonly buffer Input4 { " + std::string(glsl_type) + " data4[]; } ;\n";
+    src += "layout(set = 0, binding = 5, std430) restrict readonly buffer Input5 { " + std::string(glsl_type) + " data5[]; } ;\n";
+    src += "layout(set = 0, binding = 6, std430) restrict readonly buffer Input6 { " + std::string(glsl_type) + " data6[]; } ;\n";
+    src += "layout(set = 0, binding = 7, std430) restrict readonly buffer Input7 { " + std::string(glsl_type) + " data7[]; } ;\n";
+    src += "layout(set = 0, binding = 8, std430) restrict writeonly buffer Output { " + std::string(glsl_type) + " data_out[]; } ;\n";
+    src += "layout(set = 0, binding = 9, std430) restrict readonly buffer Meta { uint data[]; } ;\n";
+    src += "void main() {\n";
+    src += "    uint out_idx = gl_GlobalInvocationID.x;\n";
+    src += "    if (out_idx >= data_out.length()) return;\n";
+    src += "    \n";
+    src += "    // Meta layout: [num_tensors, axis, rank, out_shape[rank], out_strides[rank], \n";
+    src += "    //                offset0...offset7, size0...size7, in_strides0[rank]...in_strides7[rank]]\n";
+    src += "    uint num_tensors = data[0];\n";
+    src += "    uint axis = data[1];\n";
+    src += "    uint rank = data[2];\n";
+    src += "    uint out_shape_off = 3;\n";
+    src += "    uint out_strides_off = out_shape_off + rank;\n";
+    src += "    uint offsets_off = out_strides_off + rank;\n";
+    src += "    uint sizes_off = offsets_off + 8;\n";
+    src += "    uint in_strides_base = sizes_off + 8;\n";
+    src += "    \n";
+    src += "    // Decompose output index into coordinates\n";
+    src += "    uint coords[16];\n";
+    src += "    uint rem = out_idx;\n";
+    src += "    for (uint i = 0; i < rank; ++i) {\n";
+    src += "        uint stride = data[out_strides_off + i];\n";
+    src += "        if (stride > 0) {\n";
+    src += "            coords[i] = rem / stride;\n";
+    src += "            rem = rem % stride;\n";
+    src += "        } else {\n";
+    src += "            coords[i] = 0;\n";
+    src += "        }\n";
+    src += "    }\n";
+    src += "    \n";
+    src += "    // Determine which input tensor this output element comes from\n";
+    src += "    uint axis_coord = coords[axis];\n";
+    src += "    uint tensor_idx = 0;\n";
+    src += "    uint adjusted_coord = axis_coord;\n";
+    src += "    for (uint t = 0; t < num_tensors; ++t) {\n";
+    src += "        uint offset = data[offsets_off + t];\n";
+    src += "        uint size = data[sizes_off + t];\n";
+    src += "        if (axis_coord >= offset && axis_coord < offset + size) {\n";
+    src += "            tensor_idx = t;\n";
+    src += "            adjusted_coord = axis_coord - offset;\n";
+    src += "            break;\n";
+    src += "        }\n";
+    src += "    }\n";
+    src += "    \n";
+    src += "    // Calculate source index within the selected input tensor using its strides\n";
+    src += "    uint in_strides_off = in_strides_base + tensor_idx * rank;\n";
+    src += "    uint src_idx = 0;\n";
+    src += "    for (uint i = 0; i < rank; ++i) {\n";
+    src += "        uint coord = (i == axis) ? adjusted_coord : coords[i];\n";
+    src += "        uint stride = data[in_strides_off + i];\n";
+    src += "        src_idx += coord * stride;\n";
+    src += "    }\n";
+    src += "    \n";
+    src += "    // Read from appropriate input buffer (unrolled switch for up to 8 tensors)\n";
+    src += "    " + std::string(glsl_type) + " value;\n";
+    src += "    if (tensor_idx == 0) value = data0[src_idx];\n";
+    src += "    else if (tensor_idx == 1) value = data1[src_idx];\n";
+    src += "    else if (tensor_idx == 2) value = data2[src_idx];\n";
+    src += "    else if (tensor_idx == 3) value = data3[src_idx];\n";
+    src += "    else if (tensor_idx == 4) value = data4[src_idx];\n";
+    src += "    else if (tensor_idx == 5) value = data5[src_idx];\n";
+    src += "    else if (tensor_idx == 6) value = data6[src_idx];\n";
+    src += "    else value = data7[src_idx];\n";
+    src += "    \n";
+    src += "    data_out[out_idx] = value;\n";
+    src += "}\n";
+    
     return src;
 }
 

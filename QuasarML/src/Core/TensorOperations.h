@@ -39,18 +39,32 @@ public:
     
     // Activation functions
     std::shared_ptr<Tensor> relu(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> sigmoid(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> tanh(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> softmax(std::shared_ptr<Tensor> tensor, int axis = -1);
+    
     // Elementwise math
     std::shared_ptr<Tensor> exp(std::shared_ptr<Tensor> tensor);
     std::shared_ptr<Tensor> log(std::shared_ptr<Tensor> tensor);
     std::shared_ptr<Tensor> sin(std::shared_ptr<Tensor> tensor);
     std::shared_ptr<Tensor> cos(std::shared_ptr<Tensor> tensor);
     std::shared_ptr<Tensor> sqrt(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> abs(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> neg(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> clamp(std::shared_ptr<Tensor> tensor, float min_val, float max_val);
     
     // Linear algebra operations
     std::shared_ptr<Tensor> matmul(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
     std::shared_ptr<Tensor> transpose(std::shared_ptr<Tensor> tensor);
+    std::shared_ptr<Tensor> permute(std::shared_ptr<Tensor> tensor, const std::vector<u32>& dims);
     // convenience alias
     std::shared_ptr<Tensor> dot(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
+    
+    // Tensor manipulation
+    std::shared_ptr<Tensor> concatenate(const std::vector<std::shared_ptr<Tensor>>& tensors, u32 axis);
+    std::vector<std::shared_ptr<Tensor>> split(std::shared_ptr<Tensor> tensor, u32 num_splits, u32 axis);
+    std::shared_ptr<Tensor> squeeze(std::shared_ptr<Tensor> tensor, int axis = -1);
+    std::shared_ptr<Tensor> unsqueeze(std::shared_ptr<Tensor> tensor, u32 axis);
     
     // Reduction operations
     std::shared_ptr<Tensor> sum_axis(std::shared_ptr<Tensor> tensor, u32 axis);
@@ -95,6 +109,9 @@ private:
     std::string generate_reduce_axis_second_pass_kernel_source(DataType dtype, const std::string& op) const;
     std::string generate_relu_kernel_source(DataType dtype) const;
     std::string generate_strided_gather_kernel_source(DataType dtype) const;
+    std::string generate_activation_kernel_source(DataType dtype, const std::string& activation_func) const;
+    std::string generate_permute_kernel_source(DataType dtype) const;
+    std::string generate_concatenate_kernel_source(DataType dtype) const;
     std::string get_kernel_name_for_dtype(const std::string& base_name, DataType dtype) const;
 };
 
