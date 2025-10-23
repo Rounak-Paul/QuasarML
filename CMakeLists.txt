@@ -15,7 +15,7 @@ option(QS_ENABLE_PGO "Enable Profile-Guided Optimization helper flags (requires 
 
 # Ensure a sensible default when not specified by caller
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+    set(CMAKE_BUILD_TYPE Debug CACHE STRING "Build type" FORCE)
 endif()
 
 # Configure sensible Release flags per compiler and enable IPO/LTO when available
@@ -55,25 +55,35 @@ set(CMAKE_CXX_FLAGS_RELEASE "")
 set(CMAKE_C_FLAGS_RELEASE "")
 set(CMAKE_EXE_LINKER_FLAGS_RELEASE "")
 
+# Find Vulkan SDK dynamically
+find_package(Vulkan REQUIRED)
+
+if(NOT Vulkan_FOUND)
+    message(FATAL_ERROR "Vulkan SDK not found. Please install the Vulkan SDK and ensure it's in your PATH.")
+endif()
+
+message(STATUS "Found Vulkan: ${Vulkan_INCLUDE_DIRS}")
+message(STATUS "Vulkan Libraries: ${Vulkan_LIBRARIES}")
+
 if(APPLE)
     message("Building on Apple macOS or iOS")
-    set(VULKAN_PATH "/Users/duke/VulkanSDK/1.4.313.1/macOS")
     add_definitions(-DQS_PLATFORM_APPLE)
-    set(ENV{VK_ICD_FILENAMES} "${VULKAN_PATH}/share/vulkan/icd.d/MoltenVK_icd.json")
-    set(ENV{VK_LAYER_PATH} "${VULKAN_PATH}/share/vulkan/explicit_layer.d")
+    # Set up MoltenVK environment if Vulkan SDK provides it
+    if(EXISTS "${Vulkan_INCLUDE_DIRS}/../share/vulkan/icd.d/MoltenVK_icd.json")
+        set(ENV{VK_ICD_FILENAMES} "${Vulkan_INCLUDE_DIRS}/../share/vulkan/icd.d/MoltenVK_icd.json")
+    endif()
+    if(EXISTS "${Vulkan_INCLUDE_DIRS}/../share/vulkan/explicit_layer.d")
+        set(ENV{VK_LAYER_PATH} "${Vulkan_INCLUDE_DIRS}/../share/vulkan/explicit_layer.d")
+    endif()
 
 elseif(WIN32)
     message("Building on Windows")
-    set(VULKAN_PATH $ENV{VULKAN_SDK})
     add_definitions(-DQS_PLATFORM_WINDOWS)
 
 elseif(UNIX)
     message("Building on Unix-like OS (including Linux)")
     add_definitions(-DQS_PLATFORM_LINUX)
 
-else()
-set(CMAKE_CXX_FLAGS_RELEASE "")
-set(CMAKE_C_FLAGS_RELEASE "")
 endif()
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)

@@ -40,20 +40,18 @@ set(MI_OVERRIDE OFF CACHE BOOL "" FORCE)
 # Include directories
 target_include_directories(QuasarML PUBLIC 
     src
-    ${VULKAN_PATH}/include
+    ${Vulkan_INCLUDE_DIRS}
     SYSTEM ${CMAKE_SOURCE_DIR}/QuasarML/vendor/VMA/include
     SYSTEM ${CMAKE_SOURCE_DIR}/QuasarML/vendor/MIMALLOC
     SYSTEM ${CMAKE_SOURCE_DIR}/QuasarML/vendor/JSON/single_include
 )
-
-# Link directories
-target_link_directories(QuasarML PUBLIC ${VULKAN_PATH}/lib)
 
 # Link core libraries
 target_link_libraries(QuasarML PUBLIC 
     VulkanMemoryAllocator
     mimalloc-static
     nlohmann_json::nlohmann_json
+    ${Vulkan_LIBRARIES}
 )
 
 # Note: Do not globally hide symbols here because the project uses its own
@@ -70,17 +68,32 @@ if(QS_ENABLE_PGO)
     endif()
 endif()
 
-if(APPLE)
-    target_link_libraries(QuasarML PUBLIC 
-        ${VULKAN_PATH}/lib/libvulkan.1.dylib
-        ${VULKAN_PATH}/lib/libvulkan.1.4.313.dylib
-        ${VULKAN_PATH}/lib/libshaderc_shared.dylib
-        ${VULKAN_PATH}/lib/libspirv-cross-c-shared.dylib
-    )
-elseif(WIN32)
-    target_link_libraries(QuasarML PUBLIC 
-        ${VULKAN_PATH}/lib/vulkan-1.lib
-        ${VULKAN_PATH}/lib/shaderc_shared.lib
-    )
+# Find additional Vulkan-related libraries dynamically if available
+# This attempts to find shaderc and other common Vulkan SDK libraries
+find_library(SHADERC_LIB 
+    NAMES shaderc_shared shaderc
+    PATHS ${Vulkan_INCLUDE_DIRS}/../lib
+    NO_DEFAULT_PATH
+)
+
+if(SHADERC_LIB)
+    message(STATUS "Found shaderc library: ${SHADERC_LIB}")
+    target_link_libraries(QuasarML PUBLIC ${SHADERC_LIB})
+else()
+    message(WARNING "shaderc library not found - you may need to install it separately")
+endif()
+
+# Look for SPIRV-Cross if needed
+find_library(SPIRV_CROSS_LIB 
+    NAMES spirv-cross-c-shared spirv-cross-c
+    PATHS ${Vulkan_INCLUDE_DIRS}/../lib
+    NO_DEFAULT_PATH
+)
+
+if(SPIRV_CROSS_LIB)
+    message(STATUS "Found SPIRV-Cross library: ${SPIRV_CROSS_LIB}")
+    target_link_libraries(QuasarML PUBLIC ${SPIRV_CROSS_LIB})
+else()
+    message(STATUS "SPIRV-Cross library not found - skipping (may not be needed)")
 endif()
 
