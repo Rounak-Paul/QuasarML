@@ -1,5 +1,6 @@
 #include "Tensor.h"
 #include "Accelerator.h"
+#include "MemoryPool.h"
 #include <sstream>
 #include <algorithm>
 #include <cstring>
@@ -259,11 +260,18 @@ void Tensor::calculate_element_count() { _element_count = ::QuasarML::calculate_
 
 void Tensor::allocate_buffer() {
     if (!_backend) throw std::runtime_error("Backend not available");
+    if (!_accelerator) throw std::runtime_error("Accelerator not available");
+    
     u64 buffer_size = get_size_bytes();
     if (buffer_size == 0) throw std::runtime_error("Cannot allocate zero-sized buffer");
+    
     try {
-        // create_storage_buffer(size, host_visible)
-        _buffer = _backend->create_storage_buffer(buffer_size, !_device_only);
+        MemoryPool* pool = _accelerator->get_memory_pool();
+        if (pool) {
+            _buffer = pool->allocate(buffer_size, !_device_only);
+        } else {
+            _buffer = _backend->create_storage_buffer(buffer_size, !_device_only);
+        }
         _is_valid = _buffer.is_valid();
         if (!_is_valid) throw std::runtime_error("Failed to create storage buffer");
     } catch (const std::exception& e) {
@@ -340,8 +348,18 @@ std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor) {
 }
 
 void Tensor::cleanup_buffer() {
-    // Only destroy underlying buffer if this Tensor owns it. Views reference the buffer but do not own it.
-    if (_owns_buffer && _backend && _buffer.is_valid()) _backend->destroy_buffer(const_cast<VulkanBackend::Buffer&>(_buffer));
+    if (_owns_buffer && _backend && _buffer.is_valid()) {
+        if (_accelerator) {
+            MemoryPool* pool = _accelerator->get_memory_pool();
+            if (pool) {
+                pool->deallocate(_buffer, !_device_only);
+            } else {
+                _backend->destroy_buffer(const_cast<VulkanBackend::Buffer&>(_buffer));
+            }
+        } else {
+            _backend->destroy_buffer(const_cast<VulkanBackend::Buffer&>(_buffer));
+        }
+    }
     _buffer = {};
     _is_valid = false;
 }

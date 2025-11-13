@@ -15,6 +15,7 @@ namespace QuasarML {
 // Forward declarations
 class Kernel;
 class Tensor;
+class MemoryPool;
 
 class Accelerator {
 public:
@@ -27,11 +28,11 @@ public:
         CPU   // force CPU (host-visible buffers and CPU implementations)
     };
 
-    // Non-copyable but movable
+    // Non-copyable and non-movable due to TensorOperations reference and atomic members
     Accelerator(const Accelerator&) = delete;
     Accelerator& operator=(const Accelerator&) = delete;
-    Accelerator(Accelerator&&) = default;
-    Accelerator& operator=(Accelerator&&) = default;
+    Accelerator(Accelerator&&) = delete;
+    Accelerator& operator=(Accelerator&&) = delete;
 
     // ============================================================================
     // KERNEL MANAGEMENT
@@ -100,6 +101,23 @@ public:
     u32 get_cpu_fallback_count() const;
     void reset_cpu_fallback_count();
 
+    // ============================================================================
+    // MEMORY POOL MANAGEMENT
+    // ============================================================================
+
+    struct PoolStatistics {
+        u64 total_allocated_bytes;
+        u64 total_cached_bytes;
+        u64 active_allocations;
+        u64 cached_allocations;
+        u64 cache_hits;
+        u64 cache_misses;
+        float hit_rate;
+    };
+
+    void clear_memory_pool();
+    PoolStatistics get_pool_statistics() const;
+    void reset_pool_statistics();
 
     // ============================================================================
     // UTILITY METHODS
@@ -109,18 +127,18 @@ public:
     u32 calculate_optimal_dispatch_1d(u32 total_elements, u32 local_size = 256) const;
     std::pair<u64, u64> get_memory_usage() const;
     bool is_valid() const;
+    MemoryPool* get_memory_pool() { return _memory_pool.get(); }
 
 private:
     std::unique_ptr<VulkanBackend> _backend;
+    std::unique_ptr<MemoryPool> _memory_pool;
     std::unordered_map<std::string, std::shared_ptr<Kernel>> _kernels;
     std::vector<std::weak_ptr<Tensor>> _tensors;
     bool _recording = false;
     mutable u64 _allocated_memory = 0;
     
     TensorOperations _tensor_ops{*this};
-    // Device selection mode (Auto: prefer GPU if available)
     DeviceMode _device_mode = DeviceMode::Auto;
-    // instrumentation: number of times CPU fallback path was taken
     mutable std::atomic<u32> _cpu_fallback_count{0};
     
     // Internal helper methods
