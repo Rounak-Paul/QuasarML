@@ -722,8 +722,11 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
 
     auto kernel = get_or_create_kernel(kernel_name, glsl_source, 3, sizeof(MatMulPushConstants));
     
-    u32 dispatch_x = (a_shape[0] + 15) / 16;
-    u32 dispatch_y = (b_shape[1] + 15) / 16;
+    u32 tile_size = 16;
+    u32 block_size = 4;
+    u32 effective_tile = tile_size * block_size;
+    u32 dispatch_x = (a_shape[0] + effective_tile - 1) / effective_tile;
+    u32 dispatch_y = (b_shape[1] + effective_tile - 1) / effective_tile;
     
     _accelerator.execute(kernel, {a, b, result}, dispatch_x, dispatch_y, 1, &push_data);
     return result;
@@ -754,8 +757,8 @@ std::shared_ptr<Tensor> TensorOperations::transpose(std::shared_ptr<Tensor> tens
 
     auto kernel = get_or_create_kernel(kernel_name, glsl_source, 2, sizeof(TransposePushConstants));
     
-    u32 dispatch_x = (input_shape[0] + 15) / 16;
-    u32 dispatch_y = (input_shape[1] + 15) / 16;
+    u32 dispatch_x = (input_shape[0] + 31) / 32;
+    u32 dispatch_y = (input_shape[1] + 31) / 32;
     
     _accelerator.execute(kernel, {tensor, result}, dispatch_x, dispatch_y, 1, &push_data);
     return result;
@@ -1689,14 +1692,13 @@ std::string TensorOperations::generate_elementwise_kernel_source(const std::stri
     const char* glsl_type = dtype_to_glsl_type(dtype);
     
     std::string source = "#version 450\n"
-                        "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+                        "layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;\n";
     
     if (is_scalar) {
-        // choose push-constant type matching dtype
         const char* pc_type = "float";
         switch (dtype) {
             case DataType::F32: pc_type = "float"; break;
-            case DataType::F16: pc_type = "float"; break; // promote half to float for push constant
+            case DataType::F16: pc_type = "float"; break;
             case DataType::I32: case DataType::I16: case DataType::I8: pc_type = "int"; break;
             case DataType::U32: case DataType::U16: case DataType::U8: pc_type = "uint"; break;
             default: pc_type = "float"; break;
@@ -1727,6 +1729,8 @@ std::string TensorOperations::generate_elementwise_kernel_source(const std::stri
                      "void main() {\n"
                      "    uint index = gl_GlobalInvocationID.x;\n"
                      "    if (index >= data_a.length()) return;\n"
+                     "    " + std::string(glsl_type) + " a = data_a[index];\n"
+                     "    " + std::string(glsl_type) + " b = data_b[index];\n"
                      "    data_out[index] = " + operation + ";\n"
                      "}\n";
         } else {
@@ -1923,7 +1927,9 @@ std::string TensorOperations::generate_matmul_kernel_source(DataType dtype) cons
     const char* glsl_type = dtype_to_glsl_type(dtype);
     
     return "#version 450\n"
-           "layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;\n"
+           "#define TILE_SIZE 16\n"
+           "#define BLOCK_SIZE 4\n"
+           "layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;\n"
            "layout(push_constant) uniform PushConstants {\n"
            "    uint M; uint N; uint K;\n"
            "} pc;\n"
@@ -1936,15 +1942,76 @@ std::string TensorOperations::generate_matmul_kernel_source(DataType dtype) cons
            "layout(set = 0, binding = 2, std430) restrict writeonly buffer Result {\n"
            "    " + std::string(glsl_type) + " data_result[];\n"
            "};\n"
+           "shared " + std::string(glsl_type) + " tile_a[2][TILE_SIZE][TILE_SIZE + 1];\n"
+           "shared " + std::string(glsl_type) + " tile_b[2][TILE_SIZE][TILE_SIZE + 1];\n"
            "void main() {\n"
-           "    uint row = gl_GlobalInvocationID.x;\n"
-           "    uint col = gl_GlobalInvocationID.y;\n"
-           "    if (row >= pc.M || col >= pc.N) return;\n"
-           "    " + std::string(glsl_type) + " sum = " + std::string(glsl_type) + "(0);\n"
-           "    for (uint k = 0; k < pc.K; ++k) {\n"
-           "        sum += data_a[row * pc.K + k] * data_b[k * pc.N + col];\n"
+           "    uint local_row = gl_LocalInvocationID.x;\n"
+           "    uint local_col = gl_LocalInvocationID.y;\n"
+           "    uint base_row = gl_WorkGroupID.x * (TILE_SIZE * BLOCK_SIZE);\n"
+           "    uint base_col = gl_WorkGroupID.y * (TILE_SIZE * BLOCK_SIZE);\n"
+           "    " + std::string(glsl_type) + " acc[BLOCK_SIZE][BLOCK_SIZE];\n"
+           "    for (uint i = 0; i < BLOCK_SIZE; ++i) {\n"
+           "        for (uint j = 0; j < BLOCK_SIZE; ++j) {\n"
+           "            acc[i][j] = " + std::string(glsl_type) + "(0);\n"
+           "        }\n"
            "    }\n"
-           "    data_result[row * pc.N + col] = sum;\n"
+           "    uint num_tiles = (pc.K + TILE_SIZE - 1) / TILE_SIZE;\n"
+           "    for (uint t = 0; t < num_tiles; ++t) {\n"
+           "        uint tile_k = t * TILE_SIZE;\n"
+           "        for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n"
+           "            uint row = base_row + bi * TILE_SIZE + local_row;\n"
+           "            uint col_k = tile_k + local_col;\n"
+           "            if (row < pc.M && col_k < pc.K) {\n"
+           "                tile_a[bi % 2][local_row][local_col] = data_a[row * pc.K + col_k];\n"
+           "            } else {\n"
+           "                tile_a[bi % 2][local_row][local_col] = " + std::string(glsl_type) + "(0);\n"
+           "            }\n"
+           "        }\n"
+           "        for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n"
+           "            uint row_k = tile_k + local_row;\n"
+           "            uint col = base_col + bj * TILE_SIZE + local_col;\n"
+           "            if (row_k < pc.K && col < pc.N) {\n"
+           "                tile_b[bj % 2][local_row][local_col] = data_b[row_k * pc.N + col];\n"
+           "            } else {\n"
+           "                tile_b[bj % 2][local_row][local_col] = " + std::string(glsl_type) + "(0);\n"
+           "            }\n"
+           "        }\n"
+           "        barrier();\n"
+           "        for (uint k = 0; k < TILE_SIZE; k += 4) {\n"
+           "            " + std::string(glsl_type) + " a_reg[BLOCK_SIZE][4];\n"
+           "            " + std::string(glsl_type) + " b_reg[BLOCK_SIZE][4];\n"
+           "            for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n"
+           "                a_reg[bi][0] = tile_a[bi % 2][local_row][k];\n"
+           "                a_reg[bi][1] = tile_a[bi % 2][local_row][k + 1];\n"
+           "                a_reg[bi][2] = tile_a[bi % 2][local_row][k + 2];\n"
+           "                a_reg[bi][3] = tile_a[bi % 2][local_row][k + 3];\n"
+           "            }\n"
+           "            for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n"
+           "                b_reg[bj][0] = tile_b[bj % 2][k][local_col];\n"
+           "                b_reg[bj][1] = tile_b[bj % 2][k + 1][local_col];\n"
+           "                b_reg[bj][2] = tile_b[bj % 2][k + 2][local_col];\n"
+           "                b_reg[bj][3] = tile_b[bj % 2][k + 3][local_col];\n"
+           "            }\n"
+           "            for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n"
+           "                for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n"
+           "                    acc[bi][bj] += a_reg[bi][0] * b_reg[bj][0];\n"
+           "                    acc[bi][bj] += a_reg[bi][1] * b_reg[bj][1];\n"
+           "                    acc[bi][bj] += a_reg[bi][2] * b_reg[bj][2];\n"
+           "                    acc[bi][bj] += a_reg[bi][3] * b_reg[bj][3];\n"
+           "                }\n"
+           "            }\n"
+           "        }\n"
+           "        barrier();\n"
+           "    }\n"
+           "    for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n"
+           "        for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n"
+           "            uint out_row = base_row + bi * TILE_SIZE + local_row;\n"
+           "            uint out_col = base_col + bj * TILE_SIZE + local_col;\n"
+           "            if (out_row < pc.M && out_col < pc.N) {\n"
+           "                data_result[out_row * pc.N + out_col] = acc[bi][bj];\n"
+           "            }\n"
+           "        }\n"
+           "    }\n"
            "}\n";
 }
 
@@ -1952,7 +2019,9 @@ std::string TensorOperations::generate_transpose_kernel_source(DataType dtype) c
     const char* glsl_type = dtype_to_glsl_type(dtype);
     
     return "#version 450\n"
-           "layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;\n"
+           "#define TILE_SIZE 32\n"
+           "layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;\n"
+           "shared " + std::string(glsl_type) + " tile[TILE_SIZE][TILE_SIZE+1];\n"
            "layout(push_constant) uniform PushConstants {\n"
            "    uint rows; uint cols;\n"
            "} pc;\n"
@@ -1963,10 +2032,17 @@ std::string TensorOperations::generate_transpose_kernel_source(DataType dtype) c
            "    " + std::string(glsl_type) + " data_out[];\n"
            "};\n"
            "void main() {\n"
-           "    uint row = gl_GlobalInvocationID.x;\n"
-           "    uint col = gl_GlobalInvocationID.y;\n"
-           "    if (row >= pc.rows || col >= pc.cols) return;\n"
-           "    data_out[col * pc.rows + row] = data_in[row * pc.cols + col];\n"
+           "    uint row = gl_WorkGroupID.x * TILE_SIZE + gl_LocalInvocationID.x;\n"
+           "    uint col = gl_WorkGroupID.y * TILE_SIZE + gl_LocalInvocationID.y;\n"
+           "    if (row < pc.rows && col < pc.cols) {\n"
+           "        tile[gl_LocalInvocationID.x][gl_LocalInvocationID.y] = data_in[row * pc.cols + col];\n"
+           "    }\n"
+           "    barrier();\n"
+           "    uint out_row = gl_WorkGroupID.y * TILE_SIZE + gl_LocalInvocationID.x;\n"
+           "    uint out_col = gl_WorkGroupID.x * TILE_SIZE + gl_LocalInvocationID.y;\n"
+           "    if (out_row < pc.cols && out_col < pc.rows) {\n"
+           "        data_out[out_row * pc.rows + out_col] = tile[gl_LocalInvocationID.y][gl_LocalInvocationID.x];\n"
+           "    }\n"
            "}\n";
 }
 
@@ -1974,7 +2050,7 @@ std::string TensorOperations::generate_sum_axis_kernel_source(DataType dtype) co
     const char* glsl_type = dtype_to_glsl_type(dtype);
     
     return "#version 450\n"
-           "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n"
+           "layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;\n"
            "layout(push_constant) uniform PushConstants {\n"
            "    uint rows; uint cols; uint axis;\n"
            "} pc;\n"
@@ -2027,7 +2103,7 @@ std::string TensorOperations::generate_reduce_axis_kernel_source(DataType dtype,
     // meta layout (u32): max_rank, axis, then in_dims[padded], out_dims[padded], in_strides[padded], out_strides[padded]
     // Build the full GLSL source: we will read meta buffer to access padded dims and strides.
     std::string src = "#version 450\n";
-    src += "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n";
+    src += "layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;\n";
     src += "layout(set = 0, binding = 0, std430) restrict readonly buffer Input { " + std::string(glsl_type) + " data_in[]; } ;\n";
     src += "layout(set = 0, binding = 1, std430) restrict writeonly buffer Output { " + std::string(glsl_type) + " data_out[]; } ;\n";
     src += "layout(set = 0, binding = 2, std430) restrict readonly buffer Meta { uint shapes[]; } ;\n";

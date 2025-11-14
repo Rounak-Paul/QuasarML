@@ -22,9 +22,14 @@ bool Accelerator::use_gpu() const {
 
 Accelerator::~Accelerator() {
     if (_backend) {
-        _backend->device_wait_idle();
-        _kernels.clear();
-        cleanup_dead_tensor_references();
+        try {
+            if (_backend->is_valid()) {
+                _backend->device_wait_idle();
+            }
+            _kernels.clear();
+            cleanup_dead_tensor_references();
+        } catch (...) {
+        }
     }
 }
 
@@ -36,8 +41,11 @@ std::shared_ptr<Kernel> Accelerator::create_kernel(const std::string& name,
         throw std::runtime_error("Backend not initialized");
     }
     
-    if (_kernels.find(name) != _kernels.end()) {
-        throw std::runtime_error("Kernel with name '" + name + "' already exists");
+    std::lock_guard<std::mutex> lock(_kernel_mutex);
+    
+    auto existing = _kernels.find(name);
+    if (existing != _kernels.end()) {
+        return existing->second;
     }
     
     auto kernel = std::make_shared<Kernel>(_backend.get(), name, glsl_source, 
@@ -48,6 +56,7 @@ std::shared_ptr<Kernel> Accelerator::create_kernel(const std::string& name,
 }
 
 std::shared_ptr<Kernel> Accelerator::get_kernel(const std::string& name) const {
+    std::lock_guard<std::mutex> lock(_kernel_mutex);
     auto it = _kernels.find(name);
     if (it != _kernels.end()) {
         return it->second;
@@ -56,6 +65,7 @@ std::shared_ptr<Kernel> Accelerator::get_kernel(const std::string& name) const {
 }
 
 bool Accelerator::remove_kernel(const std::string& name) {
+    std::lock_guard<std::mutex> lock(_kernel_mutex);
     auto it = _kernels.find(name);
     if (it != _kernels.end()) {
         _kernels.erase(it);
@@ -65,6 +75,7 @@ bool Accelerator::remove_kernel(const std::string& name) {
 }
 
 std::vector<std::string> Accelerator::get_kernel_names() const {
+    std::lock_guard<std::mutex> lock(_kernel_mutex);
     std::vector<std::string> names;
     names.reserve(_kernels.size());
     
@@ -81,7 +92,14 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");
     }
-    // Respect global device policy: if Accelerator is configured to CPU, make tensors host-visible by default
+    
+    if (_tensor_pooling_enabled && device_only && use_gpu()) {
+        auto pooled = get_pooled_tensor(shape, dtype);
+        if (pooled) {
+            return pooled;
+        }
+    }
+    
     bool final_device_only = device_only;
     if (!use_gpu()) {
         final_device_only = false;
@@ -89,11 +107,14 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape
 
     auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, final_device_only);
     
-    _tensors.push_back(tensor);
-    _allocated_memory += tensor->get_size_bytes();
-    
-    if (_tensors.size() % 100 == 0) {
-        cleanup_dead_tensor_references();
+    {
+        std::lock_guard<std::mutex> lock(_tensor_mutex);
+        _tensors.push_back(tensor);
+        _allocated_memory += tensor->get_size_bytes();
+        
+        if (_tensors.size() % 100 == 0) {
+            cleanup_dead_tensor_references();
+        }
     }
     
     return tensor;
@@ -128,11 +149,11 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const void* data,
 }
 
 void Accelerator::execute(std::shared_ptr<Kernel> kernel,
-                            const std::vector<std::shared_ptr<Tensor>>& tensors,
-                            u32 dispatch_x,
-                            u32 dispatch_y,
-                            u32 dispatch_z,
-                            const void* push_data) {
+                        const std::vector<std::shared_ptr<Tensor>>& tensors,
+                        u32 dispatch_x,
+                        u32 dispatch_y,
+                        u32 dispatch_z,
+                        const void* push_data) {
     if (!kernel) {
         throw std::invalid_argument("Kernel cannot be null");
     }
@@ -143,6 +164,27 @@ void Accelerator::execute(std::shared_ptr<Kernel> kernel,
     
     validate_tensor_compatibility(tensors, kernel);
     
+    if (_auto_batching_enabled && !_recording) {
+        DeferredOperation op;
+        op.kernel = kernel;
+        op.tensors = tensors;
+        op.dispatch_x = dispatch_x;
+        op.dispatch_y = dispatch_y;
+        op.dispatch_z = dispatch_z;
+        
+        if (push_data && kernel->get_push_constant_size() > 0) {
+            op.push_data.resize(kernel->get_push_constant_size());
+            std::memcpy(op.push_data.data(), push_data, kernel->get_push_constant_size());
+        }
+        
+        _deferred_ops.push_back(std::move(op));
+        
+        if (should_flush_batch()) {
+            submit_batched_operations();
+        }
+        return;
+    }
+    
     for (size_t i = 0; i < tensors.size(); ++i) {
         if (!tensors[i]) {
             throw std::invalid_argument("Tensor at index " + std::to_string(i) + " is null");
@@ -151,9 +193,9 @@ void Accelerator::execute(std::shared_ptr<Kernel> kernel,
     }
     
     kernel->execute(dispatch_x, dispatch_y, dispatch_z, push_data);
-}
-
-void Accelerator::begin_recording() {
+}void Accelerator::begin_recording() {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
     if (_recording) {
         throw std::runtime_error("Already recording - call end_recording() first");
     }
@@ -193,6 +235,8 @@ void Accelerator::record_execution(std::shared_ptr<Kernel> kernel,
 }
 
 void Accelerator::end_recording() {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
     if (!_recording) {
         throw std::runtime_error("Not recording - call begin_recording() first");
     }
@@ -207,6 +251,12 @@ void Accelerator::end_recording() {
 }
 
 void Accelerator::synchronize() {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
+    if (_auto_batching_enabled && !_deferred_ops.empty()) {
+        submit_batched_operations();
+    }
+    
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");
     }
@@ -215,6 +265,8 @@ void Accelerator::synchronize() {
 }
 
 void Accelerator::memory_barrier() {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
     if (!_recording) {
         throw std::runtime_error("Memory barrier can only be called during recording");
     }
@@ -303,6 +355,128 @@ void Accelerator::validate_tensor_compatibility(const std::vector<std::shared_pt
         }
         if (!tensor->is_valid()) {
             throw std::invalid_argument("Tensor is not valid");
+        }
+    }
+}
+
+void Accelerator::enable_auto_batching(bool enable) {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
+    if (!enable && !_deferred_ops.empty()) {
+        submit_batched_operations();
+    }
+    
+    _auto_batching_enabled = enable;
+}
+
+void Accelerator::flush_pipeline() {
+    std::lock_guard<std::mutex> lock(_command_mutex);
+    
+    if (!_deferred_ops.empty()) {
+        submit_batched_operations();
+    }
+}
+
+void Accelerator::submit_batched_operations() {
+    if (_deferred_ops.empty() || !_backend) {
+        return;
+    }
+    
+    _backend->begin_compute_recording();
+    
+    for (auto& op : _deferred_ops) {
+        for (size_t i = 0; i < op.tensors.size(); ++i) {
+            op.kernel->bind_tensor(static_cast<u32>(i), op.tensors[i]);
+        }
+        
+        const void* push_ptr = op.push_data.empty() ? nullptr : op.push_data.data();
+        op.kernel->record_execution(op.dispatch_x, op.dispatch_y, op.dispatch_z, push_ptr);
+    }
+    
+    _backend->execute_recorded_commands();
+    _backend->wait_for_compute();
+    _deferred_ops.clear();
+}
+
+bool Accelerator::should_flush_batch() const {
+    return _deferred_ops.size() >= MAX_BATCH_SIZE;
+}
+
+void Accelerator::enable_tensor_pooling(bool enable) {
+    std::lock_guard<std::mutex> lock(_pool_mutex);
+    _tensor_pooling_enabled = enable;
+    if (!enable) {
+        _tensor_pool.clear();
+    }
+}
+
+void Accelerator::clear_tensor_pool() {
+    std::lock_guard<std::mutex> lock(_pool_mutex);
+    _tensor_pool.clear();
+}
+
+u64 Accelerator::calculate_tensor_size_key(const std::vector<u32>& shape, DataType dtype) const {
+    u64 total_elements = 1;
+    for (u32 dim : shape) {
+        total_elements *= dim;
+    }
+    return (total_elements << 8) | static_cast<u64>(dtype);
+}
+
+std::shared_ptr<Tensor> Accelerator::get_pooled_tensor(const std::vector<u32>& shape, DataType dtype) {
+    std::lock_guard<std::mutex> lock(_pool_mutex);
+    
+    u64 size_key = calculate_tensor_size_key(shape, dtype);
+    auto it = _tensor_pool.find(size_key);
+    
+    if (it != _tensor_pool.end() && !it->second.empty()) {
+        auto entry = it->second.back();
+        it->second.pop_back();
+        
+        if (it->second.empty()) {
+            _tensor_pool.erase(it);
+        }
+        
+        return entry.tensor;
+    }
+    
+    _current_frame++;
+    if (_current_frame % POOL_CLEANUP_INTERVAL == 0) {
+        cleanup_tensor_pool();
+    }
+    
+    return nullptr;
+}
+
+void Accelerator::return_tensor_to_pool(std::shared_ptr<Tensor> tensor) {
+    if (!_tensor_pooling_enabled || !tensor) {
+        return;
+    }
+    
+    std::lock_guard<std::mutex> lock(_pool_mutex);
+    
+    u64 size_key = calculate_tensor_size_key(tensor->get_shape(), tensor->get_dtype());
+    TensorPoolEntry entry{tensor, _current_frame};
+    _tensor_pool[size_key].push_back(entry);
+}
+
+void Accelerator::cleanup_tensor_pool() {
+    const u64 max_age = 50;
+    
+    for (auto it = _tensor_pool.begin(); it != _tensor_pool.end();) {
+        auto& entries = it->second;
+        entries.erase(
+            std::remove_if(entries.begin(), entries.end(),
+                [this, max_age](const TensorPoolEntry& entry) {
+                    return (_current_frame - entry.last_used_frame) > max_age;
+                }),
+            entries.end()
+        );
+        
+        if (entries.empty()) {
+            it = _tensor_pool.erase(it);
+        } else {
+            ++it;
         }
     }
 }

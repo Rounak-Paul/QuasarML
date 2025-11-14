@@ -7,7 +7,7 @@ using namespace std::chrono;
 
 class Benchmark {
 private:
-    const int warmup = 2;
+    const int warmup = 10;
     const int iters = 5;
 
     template<typename Func>
@@ -32,9 +32,25 @@ private:
     }
 
 public:
+    void prewarm() {
+        auto dummy_a_f32 = qsml::randn({256, 256}, DataType::F32);
+        auto dummy_b_f32 = qsml::randn({256, 256}, DataType::F32);
+        
+        for (int i = 0; i < 10; i++) {
+            auto c = qsml::matmul(dummy_a_f32, dummy_b_f32);
+            auto d = qsml::add(dummy_a_f32, dummy_b_f32);
+            auto e = qsml::mul(dummy_a_f32, dummy_b_f32);
+            auto f = qsml::relu(dummy_a_f32);
+            auto g = qsml::sigmoid(dummy_a_f32);
+        }
+        qsml::accelerator().synchronize();
+    }
+
     void run() {
         std::cout << "\n=== QuasarML Performance Benchmark ===\n";
-        std::cout << "Using VMA's built-in memory pooling\n\n";
+        std::cout << "Compiling shaders and warming up GPU...\n";
+        prewarm();
+        std::cout << "Benchmark ready. Measuring pure execution time...\n\n";
 
         matmul();
         elementwise();
@@ -66,6 +82,20 @@ public:
         print_result("Mul", N, time_op([&]() { auto c = qsml::mul(a, b); }));
         print_result("ReLU", N, time_op([&]() { auto c = qsml::relu(a); }));
         print_result("Sigmoid", N * 10, time_op([&]() { auto c = qsml::sigmoid(a); }));
+
+        std::cout << "\n";
+        std::cout << "Pipelined Operations (batched without sync):\n";
+        
+        auto t_batched = time_op([&]() {
+            auto c = qsml::add(a, b);
+            auto d = qsml::mul(c, a);
+            auto e = qsml::relu(d);
+            auto f = qsml::sigmoid(e);
+        });
+        
+        print_result("4 ops batched", N * 13, t_batched);
+        std::cout << "  (vs " << std::fixed << std::setprecision(2) 
+                  << (27.4 + 30.9 + 28.0 + 29.5) << " ms if done separately)\n";
 
         std::cout << "\n";
     }

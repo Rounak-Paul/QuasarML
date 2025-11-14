@@ -4,6 +4,7 @@
 // Modern functional API for tensor operations
 
 #include <Core/Accelerator.h>
+#include <Core/AcceleratorManager.h>
 #include <Core/Kernel.h>
 #include <Core/Tensor.h>
 #include <Core/DataTypes.h>
@@ -14,6 +15,7 @@
 namespace qsml {
 
 using QuasarML::Accelerator;
+using QuasarML::AcceleratorManager;
 using QuasarML::Kernel;
 
 // Tensor type alias for cleaner syntax
@@ -35,6 +37,35 @@ namespace detail {
     }
 }
 
+// Multi-GPU Support
+inline u32 device_count() {
+    return AcceleratorManager::instance().get_device_count();
+}
+
+inline std::vector<std::string> device_names() {
+    return AcceleratorManager::instance().get_device_names();
+}
+
+inline void set_device(u32 device_id) {
+    AcceleratorManager::instance().set_default_device(device_id);
+    auto* acc = AcceleratorManager::instance().get_accelerator(device_id);
+    if (acc) {
+        detail::default_accelerator() = acc;
+    }
+}
+
+inline u32 current_device() {
+    return AcceleratorManager::instance().get_default_device();
+}
+
+inline Accelerator& get_device(u32 device_id) {
+    auto* acc = AcceleratorManager::instance().get_accelerator(device_id);
+    if (!acc) {
+        throw std::runtime_error("Failed to get accelerator for device " + std::to_string(device_id));
+    }
+    return *acc;
+}
+
 // Set a custom accelerator (takes ownership or reference)
 inline void set_accelerator(Accelerator& acc) {
     detail::default_accelerator() = &acc;
@@ -53,6 +84,23 @@ inline Accelerator& accelerator() {
 // Check if GPU is available
 inline bool gpu_available() {
     return accelerator().use_gpu();
+}
+
+// Pipelining controls
+inline void enable_auto_batching(bool enable = true) {
+    accelerator().enable_auto_batching(enable);
+}
+
+inline bool is_auto_batching_enabled() {
+    return accelerator().is_auto_batching_enabled();
+}
+
+inline void flush_pipeline() {
+    accelerator().flush_pipeline();
+}
+
+inline void synchronize() {
+    accelerator().synchronize();
 }
 
 // ============================================================================

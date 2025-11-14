@@ -93,7 +93,17 @@ public:
     // Device mode control
     void set_device_mode(DeviceMode mode) { _device_mode = mode; }
     DeviceMode get_device_mode() const { return _device_mode; }
-    bool use_gpu() const; // true when operations should run on GPU
+    bool use_gpu() const;
+    
+    // Pipelining control
+    void enable_auto_batching(bool enable = true);
+    bool is_auto_batching_enabled() const { return _auto_batching_enabled; }
+    void flush_pipeline();
+    
+    // Tensor pooling control
+    void enable_tensor_pooling(bool enable = true);
+    bool is_tensor_pooling_enabled() const { return _tensor_pooling_enabled; }
+    void clear_tensor_pool(); // true when operations should run on GPU
 
     // CPU fallback instrumentation (tests can query how often CPU implementations ran)
     void notify_cpu_fallback();
@@ -110,6 +120,18 @@ public:
     bool is_valid() const;
 
 private:
+    struct DeferredOperation {
+        std::shared_ptr<Kernel> kernel;
+        std::vector<std::shared_ptr<Tensor>> tensors;
+        u32 dispatch_x, dispatch_y, dispatch_z;
+        std::vector<u8> push_data;
+    };
+    
+    struct TensorPoolEntry {
+        std::shared_ptr<Tensor> tensor;
+        u64 last_used_frame;
+    };
+    
     std::unique_ptr<VulkanBackend> _backend;
     std::unordered_map<std::string, std::shared_ptr<Kernel>> _kernels;
     std::vector<std::weak_ptr<Tensor>> _tensors;
@@ -120,10 +142,31 @@ private:
     DeviceMode _device_mode = DeviceMode::Auto;
     mutable std::atomic<u32> _cpu_fallback_count{0};
     
+    bool _auto_batching_enabled = true;
+    std::vector<DeferredOperation> _deferred_ops;
+    static constexpr size_t MAX_BATCH_SIZE = 32;
+    
+    std::unordered_map<u64, std::vector<TensorPoolEntry>> _tensor_pool;
+    u64 _current_frame = 0;
+    bool _tensor_pooling_enabled = true;
+    static constexpr u64 POOL_CLEANUP_INTERVAL = 100;
+    
+    mutable std::mutex _kernel_mutex;
+    mutable std::mutex _tensor_mutex;
+    mutable std::mutex _command_mutex;
+    mutable std::mutex _pool_mutex;
+    
     // Internal helper methods
     void cleanup_dead_tensor_references();
     void validate_tensor_compatibility(const std::vector<std::shared_ptr<Tensor>>& tensors, 
                                         std::shared_ptr<Kernel> kernel) const;
+    void submit_batched_operations();
+    bool should_flush_batch() const;
+    
+    std::shared_ptr<Tensor> get_pooled_tensor(const std::vector<u32>& shape, DataType dtype);
+    void return_tensor_to_pool(std::shared_ptr<Tensor> tensor);
+    void cleanup_tensor_pool();
+    u64 calculate_tensor_size_key(const std::vector<u32>& shape, DataType dtype) const;
 };
 
 } // namespace QuasarML

@@ -89,14 +89,31 @@ VulkanBackend::VulkanBackend(const std::string& name, u32 gpu_idx)
 
 VulkanBackend::~VulkanBackend()
 {
-    device_wait_idle();
+    try {
+        if (_ctx.device.logical_device != VK_NULL_HANDLE) {
+            vkDeviceWaitIdle(_ctx.device.logical_device);
+        }
 
-    _deletion_queue.flush();
-    
-    // Reset API version info
-    _ctx.api_major = 0;
-    _ctx.api_minor = 0;
-    _ctx.api_patch = 0;
+        {
+            std::lock_guard<std::mutex> lock(_thread_resources_mutex);
+            for (auto& [tid, resources] : _thread_resources) {
+                if (resources.fence != VK_NULL_HANDLE) {
+                    vkDestroyFence(_ctx.device.logical_device, resources.fence, nullptr);
+                }
+                if (resources.command_pool != VK_NULL_HANDLE) {
+                    vkDestroyCommandPool(_ctx.device.logical_device, resources.command_pool, nullptr);
+                }
+            }
+            _thread_resources.clear();
+        }
+
+        _deletion_queue.flush();
+        
+        _ctx.api_major = 0;
+        _ctx.api_minor = 0;
+        _ctx.api_patch = 0;
+    } catch (...) {
+    }
 }
 
 bool VulkanBackend::is_valid() const {
@@ -111,24 +128,15 @@ void VulkanBackend::device_wait_idle()
 
 b8 VulkanBackend::create_command_buffers() {
     VkCommandPoolCreateInfo pool_info = command_pool_create_info(
-        _ctx.device.compute_queue_index,  // Use compute queue instead of graphics
+        _ctx.device.compute_queue_index,
         VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
     );
 
-    // Single command pool for compute operations
-    VK_CHECK(vkCreateCommandPool(_ctx.device.logical_device, &pool_info, nullptr, &_compute_command_pool));
-    
-    // Allocate one or more command buffers for compute work
-    VkCommandBufferAllocateInfo cmd_info = command_buffer_allocate_info(_compute_command_pool, 1);
-    VK_CHECK(vkAllocateCommandBuffers(_ctx.device.logical_device, &cmd_info, &_compute_command_buffer));
-
-    // Optional: Keep the immediate command buffer for one-off operations
     VK_CHECK(vkCreateCommandPool(_ctx.device.logical_device, &pool_info, nullptr, &_imm_command_pool));
     VkCommandBufferAllocateInfo cmdAllocInfo = command_buffer_allocate_info(_imm_command_pool, 1);
     VK_CHECK(vkAllocateCommandBuffers(_ctx.device.logical_device, &cmdAllocInfo, &_imm_command_buffer));
 
     _deletion_queue.push_function([&]() {
-        vkDestroyCommandPool(_ctx.device.logical_device, _compute_command_pool, nullptr);
         vkDestroyCommandPool(_ctx.device.logical_device, _imm_command_pool, nullptr);
     });
 
@@ -138,21 +146,50 @@ b8 VulkanBackend::create_command_buffers() {
 b8 VulkanBackend::create_sync_objects() {
     VkFenceCreateInfo fence_info = fence_create_info(VK_FENCE_CREATE_SIGNALED_BIT);
     
-    // Main compute fence - for waiting on compute operations to complete
-    VK_CHECK(vkCreateFence(_ctx.device.logical_device, &fence_info, nullptr, &_compute_fence));
-    
-    // Immediate fence - for one-off operations (data uploads/downloads)
     VK_CHECK(vkCreateFence(_ctx.device.logical_device, &fence_info, nullptr, &_imm_fence));
 
     _deletion_queue.push_function([&]() {
-        vkDestroyFence(_ctx.device.logical_device, _compute_fence, nullptr);
         vkDestroyFence(_ctx.device.logical_device, _imm_fence, nullptr);
     });
 
     return true;
 }
 
+VulkanBackend::ThreadCommandResources& VulkanBackend::get_thread_command_resources() {
+    std::thread::id tid = std::this_thread::get_id();
+    
+    {
+        std::lock_guard<std::mutex> lock(_thread_resources_mutex);
+        auto it = _thread_resources.find(tid);
+        if (it != _thread_resources.end()) {
+            return it->second;
+        }
+    }
+    
+    ThreadCommandResources resources;
+    
+    VkCommandPoolCreateInfo pool_info = command_pool_create_info(
+        _ctx.device.compute_queue_index,
+        VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT
+    );
+    VK_CHECK(vkCreateCommandPool(_ctx.device.logical_device, &pool_info, nullptr, &resources.command_pool));
+    
+    VkCommandBufferAllocateInfo cmd_info = command_buffer_allocate_info(resources.command_pool, 1);
+    VK_CHECK(vkAllocateCommandBuffers(_ctx.device.logical_device, &cmd_info, &resources.command_buffer));
+    
+    VkFenceCreateInfo fence_info = fence_create_info(VK_FENCE_CREATE_SIGNALED_BIT);
+    VK_CHECK(vkCreateFence(_ctx.device.logical_device, &fence_info, nullptr, &resources.fence));
+    
+    {
+        std::lock_guard<std::mutex> lock(_thread_resources_mutex);
+        _thread_resources[tid] = resources;
+        return _thread_resources[tid];
+    }
+}
+
 VulkanBackend::Buffer VulkanBackend::create_storage_buffer(VkDeviceSize size, bool host_visible) {
+    std::lock_guard<std::mutex> lock(_buffer_mutex);
+    
     Buffer buffer = {};
     buffer.size = size;
     
@@ -227,6 +264,7 @@ VulkanBackend::Buffer VulkanBackend::create_uniform_buffer(VkDeviceSize size) {
 
 void VulkanBackend::destroy_buffer(Buffer& buffer) {
     if (buffer.buffer != VK_NULL_HANDLE) {
+        std::lock_guard<std::mutex> lock(_buffer_mutex);
         vmaDestroyBuffer(_ctx.allocator, buffer.buffer, buffer.allocation);
         buffer = {};
     }
@@ -375,6 +413,8 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
 }
 
 VkDescriptorSet VulkanBackend::allocate_descriptor_set(ComputePipeline& pipeline) {
+    std::lock_guard<std::mutex> lock(_descriptor_mutex);
+    
     VkDescriptorSetAllocateInfo alloc_info = {};
     alloc_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     alloc_info.descriptorPool = pipeline.descriptor_pool;
@@ -385,7 +425,6 @@ VkDescriptorSet VulkanBackend::allocate_descriptor_set(ComputePipeline& pipeline
     VkResult result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
     
     if (result != VK_SUCCESS) {
-        // If allocation fails, reset the pool and try again
         vkResetDescriptorPool(_ctx.device.logical_device, pipeline.descriptor_pool, 0);
         result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
         VK_CHECK(result);
@@ -406,15 +445,15 @@ void VulkanBackend::execute_compute(ComputePipeline& pipeline, u32 group_x, u32 
 void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group_x, u32 group_y, u32 group_z,
                                            const void* push_constants, u32 push_constant_size,
                                            const std::vector<BufferBinding>& buffers) {
-    if (!_recording) {
+    auto& resources = get_thread_command_resources();
+    
+    if (!resources.recording) {
         LOG_ERROR("Must call begin_compute_recording() first");
         return;
     }
     
-    // Allocate a fresh descriptor set for this dispatch
     VkDescriptorSet descriptor_set = allocate_descriptor_set(pipeline);
     
-    // Update the descriptor set with the provided buffers
     if (!buffers.empty()) {
         std::vector<VkDescriptorBufferInfo> buffer_infos(buffers.size());
         std::vector<VkWriteDescriptorSet> writes(buffers.size());
@@ -424,8 +463,6 @@ void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group
             if (!b) throw std::runtime_error("Null buffer binding provided");
             buffer_infos[i].buffer = b->buffer;
             buffer_infos[i].offset = buffers[i].offset;
-            // If caller passed range==0 treat it as "to the end of the underlying buffer from offset".
-            // Use (b->size - offset) as the descriptor range so that offset + range does not exceed buffer size.
             VkDeviceSize effective_range = 0;
             if (buffers[i].range == 0) {
                 if (buffers[i].offset >= b->size) {
@@ -450,30 +487,31 @@ void VulkanBackend::record_compute_dispatch(ComputePipeline& pipeline, u32 group
                               writes.data(), 0, nullptr);
     }
     
-    vkCmdBindPipeline(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
-    vkCmdBindDescriptorSets(_compute_command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+    vkCmdBindPipeline(resources.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline.pipeline);
+    vkCmdBindDescriptorSets(resources.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline.layout, 0, 1, &descriptor_set, 0, nullptr);
     
     if (push_constants && push_constant_size > 0) {
-        vkCmdPushConstants(_compute_command_buffer, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 
+        vkCmdPushConstants(resources.command_buffer, pipeline.layout, VK_SHADER_STAGE_COMPUTE_BIT, 
                           0, push_constant_size, push_constants);
     }
     
-    vkCmdDispatch(_compute_command_buffer, group_x, group_y, group_z);
+    vkCmdDispatch(resources.command_buffer, group_x, group_y, group_z);
 }
 
 void VulkanBackend::begin_compute_recording() {
-    // Reset descriptor pools at the beginning of each frame
+    auto& resources = get_thread_command_resources();
+    
     _current_frame = (_current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     
-    VK_CHECK(vkResetCommandBuffer(_compute_command_buffer, 0));
+    VK_CHECK(vkResetCommandBuffer(resources.command_buffer, 0));
     
     VkCommandBufferBeginInfo begin_info = {};
     begin_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     
-    VK_CHECK(vkBeginCommandBuffer(_compute_command_buffer, &begin_info));
-    _recording = true;
+    VK_CHECK(vkBeginCommandBuffer(resources.command_buffer, &begin_info));
+    resources.recording = true;
 }
 
 void VulkanBackend::destroy_compute_pipeline(ComputePipeline& pipeline) {
@@ -493,30 +531,38 @@ void VulkanBackend::destroy_compute_pipeline(ComputePipeline& pipeline) {
 }
 
 void VulkanBackend::execute_recorded_commands() {
-    if (!_recording) {
+    auto& resources = get_thread_command_resources();
+    
+    if (!resources.recording) {
         LOG_ERROR("No commands recorded");
         return;
     }
     
-    VK_CHECK(vkEndCommandBuffer(_compute_command_buffer));
-    _recording = false;
+    VK_CHECK(vkEndCommandBuffer(resources.command_buffer));
+    resources.recording = false;
     
-    VK_CHECK(vkResetFences(_ctx.device.logical_device, 1, &_compute_fence));
+    VK_CHECK(vkResetFences(_ctx.device.logical_device, 1, &resources.fence));
     
     VkSubmitInfo submit_info = {};
     submit_info.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submit_info.commandBufferCount = 1;
-    submit_info.pCommandBuffers = &_compute_command_buffer;
+    submit_info.pCommandBuffers = &resources.command_buffer;
     
-    VK_CHECK(vkQueueSubmit(_ctx.device.compute_queue, 1, &submit_info, _compute_fence));
+    {
+        std::lock_guard<std::mutex> queue_lock(_queue_mutex);
+        VK_CHECK(vkQueueSubmit(_ctx.device.compute_queue, 1, &submit_info, resources.fence));
+    }
 }
 
 void VulkanBackend::wait_for_compute() {
-    VK_CHECK(vkWaitForFences(_ctx.device.logical_device, 1, &_compute_fence, VK_TRUE, UINT64_MAX));
+    auto& resources = get_thread_command_resources();
+    VK_CHECK(vkWaitForFences(_ctx.device.logical_device, 1, &resources.fence, VK_TRUE, UINT64_MAX));
 }
 
 void VulkanBackend::memory_barrier() {
-    if (!_recording) {
+    auto& resources = get_thread_command_resources();
+    
+    if (!resources.recording) {
         LOG_ERROR("Must be recording commands to insert memory barrier");
         return;
     }
@@ -526,7 +572,7 @@ void VulkanBackend::memory_barrier() {
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     
-    vkCmdPipelineBarrier(_compute_command_buffer, 
+    vkCmdPipelineBarrier(resources.command_buffer, 
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 
                         0, 1, &barrier, 0, nullptr, 0, nullptr);

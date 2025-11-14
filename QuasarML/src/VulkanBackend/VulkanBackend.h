@@ -127,22 +127,37 @@ class VulkanBackend {
 
     // Query whether the backend successfully initialized and the logical device is valid
     bool is_valid() const;
+    
+    // Get GPU index for multi-GPU support
+    u32 get_gpu_index() const { return _gpu_idx; }
 
     private:
-    bool _recording = false;  // Track if we're recording commands
+    bool _recording = false;
+    u32 _gpu_idx = 0;
+    
+    mutable std::mutex _command_mutex;
+    mutable std::mutex _buffer_mutex;
+    mutable std::mutex _descriptor_mutex;
+    mutable std::mutex _queue_mutex;
+    
+    struct ThreadCommandResources {
+        VkCommandPool command_pool = VK_NULL_HANDLE;
+        VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        bool recording = false;
+    };
+    
+    ThreadCommandResources& get_thread_command_resources();
+    mutable std::unordered_map<std::thread::id, ThreadCommandResources> _thread_resources;
+    mutable std::mutex _thread_resources_mutex;
     
     private:
     DeletionQueue _deletion_queue;
     VulkanContext _ctx;
 
-    VkFence _compute_fence;
-    VkCommandPool _compute_command_pool;
-    VkCommandBuffer _compute_command_buffer;
-
-    // immediate submit structures
-    VkFence _imm_fence;
-    VkCommandBuffer _imm_command_buffer;
     VkCommandPool _imm_command_pool;
+    VkCommandBuffer _imm_command_buffer;
+    VkFence _imm_fence;
     VkSampler _imm_sampler;
     VkDescriptorPool _immui_pool;
 
