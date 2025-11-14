@@ -1049,7 +1049,7 @@ std::shared_ptr<Tensor> TensorOperations::log(std::shared_ptr<Tensor> tensor) {
     }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("log", dtype);
-    std::string glsl = generate_elementwise_kernel_source("log(data_in[index])", dtype);
+    std::string glsl = generate_unary_kernel_source("log(data_in[index])", dtype);
     auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
     u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
     _accelerator.execute(kernel, {tensor, result}, dispatch);
@@ -1066,7 +1066,7 @@ std::shared_ptr<Tensor> TensorOperations::sin(std::shared_ptr<Tensor> tensor) {
     }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("sin", dtype);
-    std::string glsl = generate_elementwise_kernel_source("sin(data_in[index])", dtype);
+    std::string glsl = generate_unary_kernel_source("sin(data_in[index])", dtype);
     auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
     u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
     _accelerator.execute(kernel, {tensor, result}, dispatch);
@@ -1083,7 +1083,7 @@ std::shared_ptr<Tensor> TensorOperations::cos(std::shared_ptr<Tensor> tensor) {
     }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("cos", dtype);
-    std::string glsl = generate_elementwise_kernel_source("cos(data_in[index])", dtype);
+    std::string glsl = generate_unary_kernel_source("cos(data_in[index])", dtype);
     auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
     u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
     _accelerator.execute(kernel, {tensor, result}, dispatch);
@@ -1100,7 +1100,7 @@ std::shared_ptr<Tensor> TensorOperations::sqrt(std::shared_ptr<Tensor> tensor) {
     }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("sqrt", dtype);
-    std::string glsl = generate_elementwise_kernel_source("sqrt(data_in[index])", dtype);
+    std::string glsl = generate_unary_kernel_source("sqrt(data_in[index])", dtype);
     auto kernel = get_or_create_kernel(kernel_name, glsl, 2);
     u32 dispatch = _accelerator.calculate_optimal_dispatch_1d(static_cast<u32>(tensor->get_element_count()));
     _accelerator.execute(kernel, {tensor, result}, dispatch);
@@ -1682,6 +1682,24 @@ std::shared_ptr<Kernel> TensorOperations::get_or_create_kernel(const std::string
     // Shader compilation diagnostics (including GLSL) are emitted by the Vulkan backend
     // when a compilation error occurs.
     return _accelerator.create_kernel(name, glsl_source, num_tensors, push_constant_size);
+}
+
+std::string TensorOperations::generate_unary_kernel_source(const std::string& operation, DataType dtype) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    std::string source = "#version 450\n"
+                        "layout(local_size_x = 1024, local_size_y = 1, local_size_z = 1) in;\n"
+                        "layout(set = 0, binding = 0, std430) restrict readonly buffer Input {\n"
+                        "    " + std::string(glsl_type) + " data_in[];\n"
+                        "};\n"
+                        "layout(set = 0, binding = 1, std430) restrict writeonly buffer Output {\n"
+                        "    " + std::string(glsl_type) + " data_out[];\n"
+                        "};\n"
+                        "void main() {\n"
+                        "    uint index = gl_GlobalInvocationID.x;\n"
+                        "    if (index >= data_in.length()) return;\n"
+                        "    data_out[index] = " + std::string(glsl_type) + "(" + operation + ");\n"
+                        "}\n";
+    return source;
 }
 
 std::string TensorOperations::generate_elementwise_kernel_source(const std::string& operation, 

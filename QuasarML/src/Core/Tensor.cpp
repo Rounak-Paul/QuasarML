@@ -124,6 +124,7 @@ void Tensor::upload_data(const void* data, u64 size_bytes, u64 offset_bytes) {
 void Tensor::download_data(void* data) const {
     if (!data) throw std::invalid_argument("Data pointer cannot be null");
     if (!is_valid()) throw std::runtime_error("Tensor is not in valid state");
+    if (_accelerator) _accelerator->synchronize();
     u64 total_size = get_size_bytes();
     u64 byte_offset = _element_offset * get_element_size();
     _backend->download_from_buffer(const_cast<VulkanBackend::Buffer&>(_buffer), data, total_size, byte_offset);
@@ -132,6 +133,7 @@ void Tensor::download_data(void* data) const {
 void Tensor::download_data(void* data, u64 size_bytes, u64 offset_bytes) const {
     if (!data) throw std::invalid_argument("Data pointer cannot be null");
     if (!is_valid()) throw std::runtime_error("Tensor is not in valid state");
+    if (_accelerator) _accelerator->synchronize();
     validate_data_transfer(size_bytes, offset_bytes);
     _backend->download_from_buffer(const_cast<VulkanBackend::Buffer&>(_buffer), data, size_bytes, offset_bytes);
 }

@@ -352,13 +352,13 @@ VulkanBackend::ComputePipeline VulkanBackend::create_compute_pipeline(const std:
     // Create a larger descriptor pool to handle multiple allocations
     VkDescriptorPoolSize pool_size = {};
     pool_size.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    pool_size.descriptorCount = num_storage_buffers * 100; // Allow for 100 concurrent descriptor sets
+    pool_size.descriptorCount = num_storage_buffers * 10000; // Allow for 10000 concurrent descriptor sets
     
     VkDescriptorPoolCreateInfo pool_info = {};
     pool_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     pool_info.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | 
                       VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
-    pool_info.maxSets = 100; // Allow 100 concurrent descriptor sets
+    pool_info.maxSets = 10000; // Allow 10000 concurrent descriptor sets
     pool_info.poolSizeCount = 1;
     pool_info.pPoolSizes = &pool_size;
     
@@ -425,6 +425,7 @@ VkDescriptorSet VulkanBackend::allocate_descriptor_set(ComputePipeline& pipeline
     VkResult result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
     
     if (result != VK_SUCCESS) {
+        device_wait_idle();
         vkResetDescriptorPool(_ctx.device.logical_device, pipeline.descriptor_pool, 0);
         result = vkAllocateDescriptorSets(_ctx.device.logical_device, &alloc_info, &descriptor_set);
         VK_CHECK(result);

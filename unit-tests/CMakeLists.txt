@@ -41,3 +41,25 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
 elseif(MSVC)
 	target_compile_options(_bench_compute_bound PRIVATE "$<$<CONFIG:Release>:/O2;/DNDEBUG;/GL>")
 endif()
+
+# Comprehensive test suite (all features)
+add_executable(_test_comprehensive src/_test_comprehensive.cpp)
+target_include_directories(_test_comprehensive PUBLIC src SYSTEM ${PROJECT_SOURCE_DIR}/QuasarML/include)
+target_link_libraries(_test_comprehensive PUBLIC QuasarML)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+	target_compile_options(_test_comprehensive PRIVATE "$<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native>")
+elseif(MSVC)
+	target_compile_options(_test_comprehensive PRIVATE "$<$<CONFIG:Release>:/O2;/DNDEBUG;/GL>")
+endif()
+
+# Minimal debug test
+add_executable(_test_minimal src/_test_minimal.cpp)
+target_include_directories(_test_minimal PUBLIC src SYSTEM ${PROJECT_SOURCE_DIR}/QuasarML/include)
+target_link_libraries(_test_minimal PUBLIC QuasarML)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+	target_compile_options(_test_minimal PRIVATE "$<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native>")
+elseif(MSVC)
+	target_compile_options(_test_minimal PRIVATE "$<$<CONFIG:Release>:/O2;/DNDEBUG;/GL>")
+endif()

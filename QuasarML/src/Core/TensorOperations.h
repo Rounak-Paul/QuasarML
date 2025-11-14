@@ -95,6 +95,7 @@ private:
                                                 const std::string& glsl_source, 
                                                 u32 num_tensors, u32 push_constant_size = 0);
     
+    std::string generate_unary_kernel_source(const std::string& operation, DataType dtype) const;
     std::string generate_elementwise_kernel_source(const std::string& operation, 
                                                     DataType dtype, 
                                                     bool is_scalar = false,
