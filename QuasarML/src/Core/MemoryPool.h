@@ -19,7 +19,7 @@ public:
         u64 cache_misses;
     };
 
-    explicit MemoryPool(VulkanBackend* backend);
+    explicit MemoryPool(VulkanBackend* backend, VkDeviceSize max_cache_size = 512 * 1024 * 1024);
     ~MemoryPool();
 
     MemoryPool(const MemoryPool&) = delete;
@@ -58,12 +58,14 @@ private:
     u64 _total_allocated_bytes;
     u64 _total_cached_bytes;
     u64 _active_allocations;
+    VkDeviceSize _max_cache_size;
     u64 _cached_allocations;
     u64 _cache_hits;
     u64 _cache_misses;
 
     VkDeviceSize round_up_size(VkDeviceSize size) const;
     VulkanBackend::Buffer allocate_new_buffer(VkDeviceSize size, bool host_visible);
+    void evict_if_needed(VkDeviceSize incoming_size);
 };
 
 } // namespace QuasarML

@@ -30,3 +30,14 @@ if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
 elseif(MSVC)
 	target_compile_options(_test_memory_pool PRIVATE "$<$<CONFIG:Release>:/O2;/DNDEBUG;/GL>")
 endif()
+
+# Quick memory pool test
+add_executable(_test_pool_quick src/_test_pool_quick.cpp)
+target_include_directories(_test_pool_quick PUBLIC src SYSTEM ${PROJECT_SOURCE_DIR}/QuasarML/include)
+target_link_libraries(_test_pool_quick PUBLIC QuasarML)
+
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang|AppleClang|GNU")
+	target_compile_options(_test_pool_quick PRIVATE "$<$<CONFIG:Release>:-O3;-DNDEBUG;-march=native>")
+elseif(MSVC)
+	target_compile_options(_test_pool_quick PRIVATE "$<$<CONFIG:Release>:/O2;/DNDEBUG;/GL>")
+endif()

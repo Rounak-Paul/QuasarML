@@ -3,7 +3,7 @@
 
 namespace QuasarML {
 
-MemoryPool::MemoryPool(VulkanBackend* backend)
+MemoryPool::MemoryPool(VulkanBackend* backend, VkDeviceSize max_cache_size)
     : _backend(backend)
     , _total_allocated_bytes(0)
     , _total_cached_bytes(0)
@@ -11,6 +11,7 @@ MemoryPool::MemoryPool(VulkanBackend* backend)
     , _cached_allocations(0)
     , _cache_hits(0)
     , _cache_misses(0)
+    , _max_cache_size(max_cache_size)
 {
     if (!_backend) {
         throw std::invalid_argument("Backend cannot be null");
@@ -90,10 +91,43 @@ void MemoryPool::deallocate(VulkanBackend::Buffer buffer, bool host_visible) {
     
     std::lock_guard<std::mutex> lock(_mutex);
     
+    evict_if_needed(rounded_size);
+    
     _free_buffers[key].push_back(buffer);
     _total_cached_bytes += rounded_size;
     _cached_allocations++;
     _active_allocations--;
+}
+
+void MemoryPool::evict_if_needed(VkDeviceSize incoming_size) {
+    if (_total_cached_bytes + incoming_size <= _max_cache_size) {
+        return;
+    }
+    
+    VkDeviceSize target_free = (_total_cached_bytes + incoming_size) - (_max_cache_size * 3 / 4);
+    VkDeviceSize freed = 0;
+    
+    for (auto it = _free_buffers.begin(); it != _free_buffers.end() && freed < target_free;) {
+        if (it->second.empty()) {
+            it = _free_buffers.erase(it);
+            continue;
+        }
+        
+        auto& buffer = it->second.back();
+        VkDeviceSize buffer_size = buffer.size;
+        _backend->destroy_buffer(buffer);
+        it->second.pop_back();
+        
+        _total_cached_bytes -= buffer_size;
+        _cached_allocations--;
+        freed += buffer_size;
+        
+        if (it->second.empty()) {
+            it = _free_buffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void MemoryPool::clear_cache() {
