@@ -1,18 +1,15 @@
 #include "Accelerator.h"
 #include "Kernel.h"
 #include "Tensor.h"
-#include "MemoryPool.h"
 
 namespace QuasarML {
 
 Accelerator::Accelerator(const std::string& name, u32 gpu_idx)
     : _backend(std::make_unique<VulkanBackend>(name, gpu_idx))
-    , _memory_pool(nullptr)
 {
     if (!_backend) {
         throw std::runtime_error("Failed to create Vulkan backend");
     }
-    _memory_pool = std::make_unique<MemoryPool>(_backend.get());
 }
 
 bool Accelerator::use_gpu() const {
@@ -267,42 +264,6 @@ u32 Accelerator::get_cpu_fallback_count() const {
 void Accelerator::reset_cpu_fallback_count() {
     _cpu_fallback_count.store(0u, std::memory_order_relaxed);
 }
-
-void Accelerator::clear_memory_pool() {
-    if (_memory_pool) {
-        _memory_pool->clear_cache();
-    }
-}
-
-Accelerator::PoolStatistics Accelerator::get_pool_statistics() const {
-    if (!_memory_pool) {
-        return PoolStatistics{0, 0, 0, 0, 0, 0, 0.0f};
-    }
-    
-    auto stats = _memory_pool->get_stats();
-    float hit_rate = 0.0f;
-    if (stats.cache_hits + stats.cache_misses > 0) {
-        hit_rate = static_cast<float>(stats.cache_hits) / 
-                   static_cast<float>(stats.cache_hits + stats.cache_misses);
-    }
-    
-    return PoolStatistics{
-        stats.total_allocated_bytes,
-        stats.total_cached_bytes,
-        stats.active_allocations,
-        stats.cached_allocations,
-        stats.cache_hits,
-        stats.cache_misses,
-        hit_rate
-    };
-}
-
-void Accelerator::reset_pool_statistics() {
-    if (_memory_pool) {
-        _memory_pool->reset_stats();
-    }
-}
-
 void Accelerator::cleanup_dead_tensor_references() {
     auto old_size = _tensors.size();
     

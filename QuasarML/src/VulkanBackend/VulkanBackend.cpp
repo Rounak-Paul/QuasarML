@@ -165,9 +165,12 @@ VulkanBackend::Buffer VulkanBackend::create_storage_buffer(VkDeviceSize size, bo
     VmaAllocationCreateInfo alloc_info = {};
     if (host_visible) {
         alloc_info.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-        alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+        alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | 
+                          VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                          VMA_ALLOCATION_CREATE_STRATEGY_MIN_TIME_BIT;
     } else {
         alloc_info.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+        alloc_info.flags = VMA_ALLOCATION_CREATE_STRATEGY_MIN_TIME_BIT;
     }
     
     VK_CHECK(vmaCreateBuffer(_ctx.allocator, &buffer_info, &alloc_info, 

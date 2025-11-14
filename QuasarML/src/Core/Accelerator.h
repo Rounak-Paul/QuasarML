@@ -15,7 +15,6 @@ namespace QuasarML {
 // Forward declarations
 class Kernel;
 class Tensor;
-class MemoryPool;
 
 class Accelerator {
 public:
@@ -102,24 +101,6 @@ public:
     void reset_cpu_fallback_count();
 
     // ============================================================================
-    // MEMORY POOL MANAGEMENT
-    // ============================================================================
-
-    struct PoolStatistics {
-        u64 total_allocated_bytes;
-        u64 total_cached_bytes;
-        u64 active_allocations;
-        u64 cached_allocations;
-        u64 cache_hits;
-        u64 cache_misses;
-        float hit_rate;
-    };
-
-    void clear_memory_pool();
-    PoolStatistics get_pool_statistics() const;
-    void reset_pool_statistics();
-
-    // ============================================================================
     // UTILITY METHODS
     // ============================================================================
     
@@ -127,11 +108,9 @@ public:
     u32 calculate_optimal_dispatch_1d(u32 total_elements, u32 local_size = 256) const;
     std::pair<u64, u64> get_memory_usage() const;
     bool is_valid() const;
-    MemoryPool* get_memory_pool() { return _memory_pool.get(); }
 
 private:
     std::unique_ptr<VulkanBackend> _backend;
-    std::unique_ptr<MemoryPool> _memory_pool;
     std::unordered_map<std::string, std::shared_ptr<Kernel>> _kernels;
     std::vector<std::weak_ptr<Tensor>> _tensors;
     bool _recording = false;

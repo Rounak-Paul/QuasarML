@@ -33,11 +33,12 @@ private:
 
 public:
     void run() {
-        std::cout << "\n=== QuasarML Performance Benchmark ===\n\n";
+        std::cout << "\n=== QuasarML Performance Benchmark ===\n";
+        std::cout << "Using VMA's built-in memory pooling\n\n";
 
         matmul();
         elementwise();
-        memory_pool();
+        allocation_speed();
     }
 
     void matmul() {
@@ -69,24 +70,18 @@ public:
         std::cout << "\n";
     }
 
-    void memory_pool() {
-        std::cout << "Memory Pool:\n";
-        
-        auto& acc = qsml::accelerator();
-        acc.clear_memory_pool();
-        acc.reset_pool_statistics();
+    void allocation_speed() {
+        std::cout << "VMA Allocation Performance:\n";
         
         auto start = high_resolution_clock::now();
-        for (int i = 0; i < 50; i++) {
+        for (int i = 0; i < 100; i++) {
             auto t = qsml::zeros({512, 512}, DataType::F32);
         }
         auto end = high_resolution_clock::now();
         auto ms = duration_cast<microseconds>(end - start).count() / 1000.0;
         
-        auto stats = acc.get_pool_statistics();
-        std::cout << "  50 allocations (512x512):     " << std::fixed << std::setprecision(2) << ms << " ms\n";
-        std::cout << "  Cache hit rate:                " << (stats.hit_rate * 100.0f) << "%\n";
-        std::cout << "  Cached memory:                 " << (stats.total_cached_bytes / 1024.0 / 1024.0) << " MB\n";
+        std::cout << "  100 allocations (512x512):    " << std::fixed << std::setprecision(2) << ms << " ms\n";
+        std::cout << "  Average per allocation:        " << (ms / 100.0) << " ms\n";
         std::cout << "\n";
     }
 };
