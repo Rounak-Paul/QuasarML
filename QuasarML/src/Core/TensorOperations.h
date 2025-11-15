@@ -71,6 +71,9 @@ public:
     std::shared_ptr<Tensor> mean_axis(std::shared_ptr<Tensor> tensor, u32 axis);
     std::shared_ptr<Tensor> min_axis(std::shared_ptr<Tensor> tensor, u32 axis);
     std::shared_ptr<Tensor> max_axis(std::shared_ptr<Tensor> tensor, u32 axis);
+    
+    // Normalization
+    std::shared_ptr<Tensor> layer_norm(std::shared_ptr<Tensor> tensor, std::shared_ptr<Tensor> gamma, std::shared_ptr<Tensor> beta, float epsilon = 1e-5f);
 
     // Elementwise power (supports float dtypes)
     std::shared_ptr<Tensor> pow(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b);
@@ -103,6 +106,7 @@ private:
                                                     u32 max_rank = 0) const;
     std::vector<u32> compute_strides_padded(const std::vector<u32>& shape, u32 rank) const;
     std::string generate_matmul_kernel_source(DataType dtype) const;
+    std::string generate_matmul_small_kernel_source(DataType dtype) const;
     std::string generate_transpose_kernel_source(DataType dtype) const;
     std::string generate_sum_axis_kernel_source(DataType dtype) const;
     std::string generate_reduce_axis_kernel_source(DataType dtype, const std::string& op) const;
@@ -113,6 +117,7 @@ private:
     std::string generate_activation_kernel_source(DataType dtype, const std::string& activation_func) const;
     std::string generate_permute_kernel_source(DataType dtype) const;
     std::string generate_concatenate_kernel_source(DataType dtype) const;
+    std::string generate_layer_norm_kernel_source(DataType dtype) const;
     std::string get_kernel_name_for_dtype(const std::string& base_name, DataType dtype) const;
 };
 

@@ -120,9 +120,19 @@ std::vector<std::string> AcceleratorManager::get_device_names() const {
     app_info.engineVersion = VK_MAKE_VERSION(1, 0, 0);
     app_info.apiVersion = VK_API_VERSION_1_3;
 
+    std::vector<const char*> extensions;
+#ifdef __APPLE__
+    extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+#endif
+
     VkInstanceCreateInfo create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     create_info.pApplicationInfo = &app_info;
+    create_info.enabledExtensionCount = static_cast<u32>(extensions.size());
+    create_info.ppEnabledExtensionNames = extensions.empty() ? nullptr : extensions.data();
+#ifdef __APPLE__
+    create_info.flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+#endif
     
     if (vkCreateInstance(&create_info, nullptr, &instance) != VK_SUCCESS) {
         return names;

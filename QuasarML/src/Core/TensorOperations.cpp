@@ -703,6 +703,7 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
     
     DataType dtype = a->get_dtype();
     std::vector<u32> result_shape = {a_shape[0], b_shape[1]};
+    
     if (!_accelerator.use_gpu()) {
         _accelerator.notify_cpu_fallback();
         if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
@@ -713,8 +714,9 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
 
     auto result = _accelerator.create_tensor(result_shape, dtype);
     
-    std::string kernel_name = get_kernel_name_for_dtype("matmul", dtype);
-    std::string glsl_source = generate_matmul_kernel_source(dtype);
+    bool use_small_kernel = (a_shape[0] < 64 || b_shape[1] < 64 || a_shape[1] < 64);
+    std::string kernel_name = get_kernel_name_for_dtype(use_small_kernel ? "matmul_small" : "matmul", dtype);
+    std::string glsl_source = use_small_kernel ? generate_matmul_small_kernel_source(dtype) : generate_matmul_kernel_source(dtype);
     
     struct MatMulPushConstants {
         u32 M, N, K;
@@ -722,11 +724,17 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
 
     auto kernel = get_or_create_kernel(kernel_name, glsl_source, 3, sizeof(MatMulPushConstants));
     
-    u32 tile_size = 16;
-    u32 block_size = 4;
-    u32 effective_tile = tile_size * block_size;
-    u32 dispatch_x = (a_shape[0] + effective_tile - 1) / effective_tile;
-    u32 dispatch_y = (b_shape[1] + effective_tile - 1) / effective_tile;
+    u32 dispatch_x, dispatch_y;
+    if (use_small_kernel) {
+        dispatch_x = (a_shape[0] + 15) / 16;
+        dispatch_y = (b_shape[1] + 15) / 16;
+    } else {
+        u32 tile_size = 16;
+        u32 block_size = 4;
+        u32 effective_tile = tile_size * block_size;
+        dispatch_x = (a_shape[0] + effective_tile - 1) / effective_tile;
+        dispatch_y = (b_shape[1] + effective_tile - 1) / effective_tile;
+    }
     
     _accelerator.execute(kernel, {a, b, result}, dispatch_x, dispatch_y, 1, &push_data);
     return result;
@@ -843,11 +851,77 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
 
 std::shared_ptr<Tensor> TensorOperations::mean_axis(std::shared_ptr<Tensor> tensor, u32 axis) {
     auto sumt = sum_axis(tensor, axis);
-    // division by scalar
     u32 len = tensor->get_shape()[axis];
     float denom = static_cast<float>(len);
     auto denom_t = _accelerator.create_tensor(&denom, {1}, tensor->get_dtype());
     return div(sumt, denom_t);
+}
+
+std::shared_ptr<Tensor> TensorOperations::layer_norm(std::shared_ptr<Tensor> tensor, std::shared_ptr<Tensor> gamma, std::shared_ptr<Tensor> beta, float epsilon) {
+    validate_tensor_shape_2d(tensor);
+    auto shape = tensor->get_shape();
+    u32 batch_size = shape[0];
+    u32 feature_dim = shape[1];
+    
+    if (gamma->get_element_count() != feature_dim || beta->get_element_count() != feature_dim) {
+        throw std::invalid_argument("gamma and beta must have same size as last dimension");
+    }
+    
+    DataType dtype = tensor->get_dtype();
+    if (!_accelerator.use_gpu()) {
+        _accelerator.notify_cpu_fallback();
+        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
+        
+        std::vector<float> x_data(batch_size * feature_dim);
+        std::vector<float> gamma_data(feature_dim);
+        std::vector<float> beta_data(feature_dim);
+        std::vector<float> output(batch_size * feature_dim);
+        
+        tensor->download_data(x_data.data());
+        gamma->download_data(gamma_data.data());
+        beta->download_data(beta_data.data());
+        
+        for (u32 i = 0; i < batch_size; i++) {
+            float mean = 0.0f;
+            for (u32 j = 0; j < feature_dim; j++) {
+                mean += x_data[i * feature_dim + j];
+            }
+            mean /= feature_dim;
+            
+            float var = 0.0f;
+            for (u32 j = 0; j < feature_dim; j++) {
+                float diff = x_data[i * feature_dim + j] - mean;
+                var += diff * diff;
+            }
+            var /= feature_dim;
+            float std = std::sqrt(var + epsilon);
+            
+            for (u32 j = 0; j < feature_dim; j++) {
+                float normalized = (x_data[i * feature_dim + j] - mean) / std;
+                output[i * feature_dim + j] = gamma_data[j] * normalized + beta_data[j];
+            }
+        }
+        
+        return _accelerator.create_tensor(output.data(), shape, dtype, false);
+    }
+    
+    auto result = _accelerator.create_tensor(shape, dtype);
+    
+    std::string kernel_name = get_kernel_name_for_dtype("layer_norm", dtype);
+    std::string glsl_source = generate_layer_norm_kernel_source(dtype);
+    
+    struct LayerNormPushConstants {
+        u32 batch_size;
+        u32 feature_dim;
+        float epsilon;
+    } push_data = {batch_size, feature_dim, epsilon};
+    
+    auto kernel = get_or_create_kernel(kernel_name, glsl_source, 4, sizeof(LayerNormPushConstants));
+    
+    u32 dispatch_size = _accelerator.calculate_optimal_dispatch_1d(batch_size);
+    _accelerator.execute(kernel, {tensor, gamma, beta, result}, dispatch_size, 1, 1, &push_data);
+    
+    return result;
 }
 
 std::shared_ptr<Tensor> TensorOperations::min_axis(std::shared_ptr<Tensor> tensor, u32 axis) {
@@ -2064,6 +2138,35 @@ std::string TensorOperations::generate_transpose_kernel_source(DataType dtype) c
            "}\n";
 }
 
+std::string TensorOperations::generate_matmul_small_kernel_source(DataType dtype) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    return "#version 450\n"
+           "layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;\n"
+           "layout(push_constant) uniform PushConstants {\n"
+           "    uint M; uint N; uint K;\n"
+           "} pc;\n"
+           "layout(set = 0, binding = 0, std430) restrict readonly buffer MatrixA {\n"
+           "    " + std::string(glsl_type) + " data_a[];\n"
+           "};\n"
+           "layout(set = 0, binding = 1, std430) restrict readonly buffer MatrixB {\n"
+           "    " + std::string(glsl_type) + " data_b[];\n"
+           "};\n"
+           "layout(set = 0, binding = 2, std430) restrict writeonly buffer Result {\n"
+           "    " + std::string(glsl_type) + " data_result[];\n"
+           "};\n"
+           "void main() {\n"
+           "    uint row = gl_WorkGroupID.x * 16 + gl_LocalInvocationID.x;\n"
+           "    uint col = gl_WorkGroupID.y * 16 + gl_LocalInvocationID.y;\n"
+           "    if (row >= pc.M || col >= pc.N) return;\n"
+           "    " + std::string(glsl_type) + " sum = " + std::string(glsl_type) + "(0);\n"
+           "    for (uint k = 0; k < pc.K; ++k) {\n"
+           "        sum += data_a[row * pc.K + k] * data_b[k * pc.N + col];\n"
+           "    }\n"
+           "    data_result[row * pc.N + col] = sum;\n"
+           "}\n";
+}
+
 std::string TensorOperations::generate_sum_axis_kernel_source(DataType dtype) const {
     const char* glsl_type = dtype_to_glsl_type(dtype);
     
@@ -2385,6 +2488,55 @@ std::string TensorOperations::generate_concatenate_kernel_source(DataType dtype)
     src += "}\n";
     
     return src;
+}
+
+std::string TensorOperations::generate_layer_norm_kernel_source(DataType dtype) const {
+    const char* glsl_type = dtype_to_glsl_type(dtype);
+    
+    return "#version 450\n"
+           "layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;\n"
+           "layout(push_constant) uniform PushConstants {\n"
+           "    uint batch_size;\n"
+           "    uint feature_dim;\n"
+           "    float epsilon;\n"
+           "} pc;\n"
+           "layout(set = 0, binding = 0, std430) restrict readonly buffer Input {\n"
+           "    " + std::string(glsl_type) + " data_in[];\n"
+           "};\n"
+           "layout(set = 0, binding = 1, std430) restrict readonly buffer Gamma {\n"
+           "    " + std::string(glsl_type) + " gamma[];\n"
+           "};\n"
+           "layout(set = 0, binding = 2, std430) restrict readonly buffer Beta {\n"
+           "    " + std::string(glsl_type) + " beta[];\n"
+           "};\n"
+           "layout(set = 0, binding = 3, std430) restrict writeonly buffer Output {\n"
+           "    " + std::string(glsl_type) + " data_out[];\n"
+           "};\n"
+           "void main() {\n"
+           "    uint batch_idx = gl_GlobalInvocationID.x;\n"
+           "    if (batch_idx >= pc.batch_size) return;\n"
+           "    \n"
+           "    uint offset = batch_idx * pc.feature_dim;\n"
+           "    \n"
+           "    " + std::string(glsl_type) + " mean = " + std::string(glsl_type) + "(0);\n"
+           "    for (uint i = 0; i < pc.feature_dim; ++i) {\n"
+           "        mean += data_in[offset + i];\n"
+           "    }\n"
+           "    mean /= " + std::string(glsl_type) + "(pc.feature_dim);\n"
+           "    \n"
+           "    " + std::string(glsl_type) + " variance = " + std::string(glsl_type) + "(0);\n"
+           "    for (uint i = 0; i < pc.feature_dim; ++i) {\n"
+           "        " + std::string(glsl_type) + " diff = data_in[offset + i] - mean;\n"
+           "        variance += diff * diff;\n"
+           "    }\n"
+           "    variance /= " + std::string(glsl_type) + "(pc.feature_dim);\n"
+           "    " + std::string(glsl_type) + " std_dev = sqrt(variance + " + std::string(glsl_type) + "(pc.epsilon));\n"
+           "    \n"
+           "    for (uint i = 0; i < pc.feature_dim; ++i) {\n"
+           "        " + std::string(glsl_type) + " normalized = (data_in[offset + i] - mean) / std_dev;\n"
+           "        data_out[offset + i] = gamma[i] * normalized + beta[i];\n"
+           "    }\n"
+           "}\n";
 }
 
 } // namespace QuasarML

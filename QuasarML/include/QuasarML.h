@@ -219,6 +219,16 @@ inline Tensor softmax(Tensor x, int axis = -1) {
     return x->get_accelerator()->ops().softmax(x, axis);
 }
 
+inline Tensor gelu(Tensor x) {
+    auto& acc = *x->get_accelerator();
+    auto half = acc.ops().mul_scalar(x, 0.5f);
+    auto cubed_term = acc.ops().mul(x, acc.ops().mul(x, x));
+    auto inner = acc.ops().add(x, acc.ops().mul_scalar(cubed_term, 0.044715f));
+    auto tanhval = acc.ops().tanh(acc.ops().mul_scalar(inner, 0.7978845608f));
+    auto one_plus = acc.ops().add_scalar(tanhval, 1.0f);
+    return acc.ops().mul(half, one_plus);
+}
+
 // ============================================================================
 // Math Operations
 // ============================================================================
@@ -299,8 +309,12 @@ inline Tensor max_axis(Tensor x, u32 axis) {
     return max(x, axis);
 }
 
+inline Tensor layer_norm(Tensor x, Tensor gamma, Tensor beta, float epsilon = 1e-5f) {
+    return x->get_accelerator()->ops().layer_norm(x, gamma, beta, epsilon);
+}
+
 // ============================================================================
-// Tensor Manipulation
+// Tensor Shape Manipulation
 // ============================================================================
 
 inline Tensor cat(const std::vector<Tensor>& tensors, u32 axis = 0) {

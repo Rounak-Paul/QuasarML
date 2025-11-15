@@ -84,7 +84,15 @@ int main() {
 
     test.test("device_names returns non-empty list", []() {
         auto names = qsml::device_names();
-        return names.size() >= 1 && !names[0].empty();
+        if (names.empty()) {
+            std::cout << "    DEBUG: device_names returned empty vector" << std::endl;
+            return false;
+        }
+        if (names[0].empty()) {
+            std::cout << "    DEBUG: first device name is empty string" << std::endl;
+            return false;
+        }
+        return true;
     });
 
     test.test("current_device returns valid index", []() {
@@ -292,7 +300,11 @@ int main() {
         c->download_data(result.data());
         // [1,2] × [5,6] = [1*5+2*7, 1*6+2*8] = [19, 22]
         // [3,4]   [7,8]   [3*5+4*7, 3*6+4*8]   [43, 50]
-        return abs(result[0] - 19.0f) < 1e-3 && abs(result[1] - 22.0f) < 1e-3;
+        std::cout << "    DEBUG: matmul result = [" << result[0] << ", " << result[1] 
+                  << ", " << result[2] << ", " << result[3] << "]" << std::endl;
+        std::cout << "    DEBUG: expected = [19, 22, 43, 50]" << std::endl;
+        return abs(result[0] - 19.0f) < 1e-3 && abs(result[1] - 22.0f) < 1e-3 &&
+               abs(result[2] - 43.0f) < 1e-3 && abs(result[3] - 50.0f) < 1e-3;
     });
 
     test.test("matmul large matrices executes without error", [&test]() {
