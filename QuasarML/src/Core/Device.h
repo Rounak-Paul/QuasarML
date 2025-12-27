@@ -29,6 +29,7 @@ public:
     
     Backend* backend() const { return _backend.get(); }
     ComputeLimits limits() const;
+    const DeviceCapabilities& capabilities() const;
     
     std::shared_ptr<Kernel> create_kernel(const std::string& name, const std::string& glsl_source, u32 num_bindings, u32 push_size = 0);
     std::shared_ptr<Kernel> get_kernel(const std::string& name);

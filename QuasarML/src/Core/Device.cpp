@@ -54,6 +54,10 @@ ComputeLimits Device::limits() const {
     return _backend->get_compute_limits();
 }
 
+const DeviceCapabilities& Device::capabilities() const {
+    return _backend->get_capabilities();
+}
+
 std::shared_ptr<Kernel> Device::create_kernel(const std::string& name, const std::string& glsl_source, u32 num_bindings, u32 push_size) {
     std::lock_guard<std::mutex> lock(_kernel_mutex);
     

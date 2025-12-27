@@ -59,6 +59,7 @@ public:
     
     ComputeLimits get_compute_limits() const override;
     u32 optimal_dispatch_1d(u32 total, u32 local_size = 256) const override;
+    const DeviceCapabilities& get_capabilities() const override;
 
 private:
     struct ThreadResources {

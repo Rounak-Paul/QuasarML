@@ -4,10 +4,11 @@
 #include <spdlog/sinks/basic_file_sink.h>
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <memory>
+#include <Common/Types.h>
 
 namespace QuasarML {
 
-class Logger {
+class QS_API Logger {
 public:
     static void init(const std::string& log_file = "quasar.log");
     static void shutdown();

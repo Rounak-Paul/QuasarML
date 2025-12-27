@@ -5,6 +5,7 @@
 #include <vk_mem_alloc.h>
 #include <Common/Types.h>
 #include <Common/Logger.h>
+#include <Backend/DeviceCapabilities.h>
 
 namespace QuasarML {
 
@@ -34,6 +35,7 @@ struct VulkanDevice {
     VkPhysicalDeviceProperties properties = {};
     VkPhysicalDeviceFeatures features = {};
     VkPhysicalDeviceMemoryProperties memory = {};
+    VkPhysicalDeviceSubgroupProperties subgroup_properties = {};
 };
 
 struct VulkanContext {
@@ -48,6 +50,7 @@ struct VulkanContext {
     VkDebugUtilsMessengerEXT debug_messenger = VK_NULL_HANDLE;
     
     VulkanDevice device;
+    DeviceCapabilities capabilities = {};
 };
 
 struct VulkanPhysicalDeviceInfo {
@@ -60,5 +63,6 @@ struct VulkanPhysicalDeviceInfo {
 std::vector<VulkanPhysicalDeviceInfo> vulkan_enumerate_devices(VkInstance instance);
 bool vulkan_create_device(VkInstance instance, u32 device_index, VulkanDevice& device);
 void vulkan_destroy_device(VulkanDevice& device);
+void vulkan_query_capabilities(VkPhysicalDevice physical, const VkPhysicalDeviceProperties& props, DeviceCapabilities& caps);
 
 }

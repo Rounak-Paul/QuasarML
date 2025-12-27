@@ -122,4 +122,65 @@ void vulkan_destroy_device(VulkanDevice& device) {
     device.transfer_queue = VK_NULL_HANDLE;
 }
 
+void vulkan_query_capabilities(VkPhysicalDevice physical, const VkPhysicalDeviceProperties& props, DeviceCapabilities& caps) {
+    caps.device_name = props.deviceName;
+    caps.vendor_id = props.vendorID;
+    caps.device_id = props.deviceID;
+    caps.driver_version = props.driverVersion;
+    
+    caps.vendor = detect_vendor(props.vendorID);
+    caps.architecture = detect_architecture(caps.vendor, props.deviceID, props.deviceName);
+    
+    caps.max_workgroup_size[0] = props.limits.maxComputeWorkGroupSize[0];
+    caps.max_workgroup_size[1] = props.limits.maxComputeWorkGroupSize[1];
+    caps.max_workgroup_size[2] = props.limits.maxComputeWorkGroupSize[2];
+    caps.max_workgroup_invocations = props.limits.maxComputeWorkGroupInvocations;
+    caps.max_compute_workgroups[0] = props.limits.maxComputeWorkGroupCount[0];
+    caps.max_compute_workgroups[1] = props.limits.maxComputeWorkGroupCount[1];
+    caps.max_compute_workgroups[2] = props.limits.maxComputeWorkGroupCount[2];
+    caps.max_shared_memory = props.limits.maxComputeSharedMemorySize;
+    caps.max_push_constant_size = props.limits.maxPushConstantsSize;
+    
+    VkPhysicalDeviceSubgroupProperties subgroup_props = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+    VkPhysicalDeviceProperties2 props2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    props2.pNext = &subgroup_props;
+    vkGetPhysicalDeviceProperties2(physical, &props2);
+    
+    caps.subgroup.size = subgroup_props.subgroupSize;
+    caps.subgroup.basic = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0;
+    caps.subgroup.vote = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_VOTE_BIT) != 0;
+    caps.subgroup.arithmetic = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0;
+    caps.subgroup.ballot = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_BALLOT_BIT) != 0;
+    caps.subgroup.shuffle = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) != 0;
+    caps.subgroup.shuffle_relative = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT) != 0;
+    caps.subgroup.clustered = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) != 0;
+    caps.subgroup.quad = (subgroup_props.supportedOperations & VK_SUBGROUP_FEATURE_QUAD_BIT) != 0;
+    
+    VkPhysicalDeviceFeatures2 features2 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+    VkPhysicalDevice16BitStorageFeatures storage16 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES};
+    VkPhysicalDeviceShaderFloat16Int8Features fp16int8 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES};
+    features2.pNext = &storage16;
+    storage16.pNext = &fp16int8;
+    vkGetPhysicalDeviceFeatures2(physical, &features2);
+    
+    caps.fp16_storage = storage16.storageBuffer16BitAccess == VK_TRUE;
+    caps.fp16_compute = fp16int8.shaderFloat16 == VK_TRUE;
+    caps.int8 = fp16int8.shaderInt8 == VK_TRUE;
+    caps.fp64 = features2.features.shaderFloat64 == VK_TRUE;
+    caps.int16 = features2.features.shaderInt16 == VK_TRUE;
+    caps.int64 = features2.features.shaderInt64 == VK_TRUE;
+    
+    caps.buffer_device_address = true;
+    caps.descriptor_indexing = true;
+    caps.synchronization2 = true;
+    caps.timeline_semaphores = true;
+    
+    compute_optimal_parameters(caps);
+    
+    LOG_INFO("GPU: {} ({} {})", caps.device_name, vendor_to_string(caps.vendor), architecture_to_string(caps.architecture));
+    LOG_INFO("Subgroup size: {}, arithmetic: {}, shuffle: {}", caps.subgroup.size, caps.subgroup.arithmetic, caps.subgroup.shuffle);
+    LOG_INFO("FP16 storage: {}, FP16 compute: {}", caps.fp16_storage, caps.fp16_compute);
+    LOG_INFO("Optimal workgroup 1D: {}, 2D: {}, tile: {}", caps.optimal_workgroup_size_1d, caps.optimal_workgroup_size_2d, caps.optimal_tile_size);
+}
+
 }

@@ -12,7 +12,7 @@ namespace QuasarML {
 
 class Device;
 
-class Tensor : public std::enable_shared_from_this<Tensor> {
+class QS_API Tensor : public std::enable_shared_from_this<Tensor> {
 public:
     Tensor(Device* device, const std::vector<u32>& shape, DataType dtype = DataType::F32, bool host_visible = false);
     ~Tensor();
@@ -81,6 +81,6 @@ inline u64 compute_numel(const std::vector<u32>& shape) {
 
 inline bool shapes_equal(const std::vector<u32>& a, const std::vector<u32>& b) { return a == b; }
 
-std::string shape_to_string(const std::vector<u32>& shape);
+QS_API std::string shape_to_string(const std::vector<u32>& shape);
 
 }

@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include <filesystem>
 
 #define VMA_IMPLEMENTATION
 #include <vk_mem_alloc.h>
@@ -59,7 +60,8 @@ static bool compile_glsl_to_spirv(const std::string& glsl, std::vector<u32>& spi
         auto now = std::chrono::system_clock::now();
         auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
         std::ostringstream fname;
-        fname << "/tmp/quasar_shader_error_" << ms << ".glsl";
+        std::filesystem::path temp_dir = std::filesystem::temp_directory_path();
+        fname << (temp_dir / "quasar_shader_error_").string() << ms << ".glsl";
         std::ofstream ofs(fname.str());
         if (ofs) { ofs << glsl; LOG_ERROR("Wrote shader to {}", fname.str()); }
         
@@ -142,6 +144,8 @@ bool VulkanBackend::init(const std::string& name, u32 device_index) {
         return false;
     }
     _deletion_queue.push([this]() { vulkan_destroy_device(_ctx.device); });
+    
+    vulkan_query_capabilities(_ctx.device.physical, _ctx.device.properties, _ctx.capabilities);
     
     VmaAllocatorCreateInfo alloc_info = {};
     alloc_info.physicalDevice = _ctx.device.physical;
@@ -544,6 +548,10 @@ ComputeLimits VulkanBackend::get_compute_limits() const {
 
 u32 VulkanBackend::optimal_dispatch_1d(u32 total, u32 local_size) const {
     return (total + local_size - 1) / local_size;
+}
+
+const DeviceCapabilities& VulkanBackend::get_capabilities() const {
+    return _ctx.capabilities;
 }
 
 std::unique_ptr<Backend> create_vulkan_backend() {

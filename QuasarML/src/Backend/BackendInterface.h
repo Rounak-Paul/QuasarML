@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Common/Types.h>
+#include <Backend/DeviceCapabilities.h>
 #include <vector>
 #include <string>
 #include <memory>
@@ -77,6 +78,7 @@ public:
     
     virtual ComputeLimits get_compute_limits() const = 0;
     virtual u32 optimal_dispatch_1d(u32 total, u32 local_size = 256) const = 0;
+    virtual const DeviceCapabilities& get_capabilities() const = 0;
 };
 
 std::unique_ptr<Backend> create_vulkan_backend();

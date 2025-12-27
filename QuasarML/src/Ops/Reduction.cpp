@@ -4,6 +4,7 @@
 #include "DeviceTuning.h"
 #include <Core/Kernel.h>
 #include <Common/Assert.h>
+#include <Backend/DeviceCapabilities.h>
 #include <sstream>
 
 namespace QuasarML {
@@ -15,6 +16,104 @@ std::shared_ptr<Kernel> get_or_create_kernel(Device& device, const std::string& 
     auto k = device.get_kernel(key);
     if (k) return k;
     return device.create_kernel(key, code, bindings, push_size);
+}
+
+std::string sum_shader_subgroup(DataType dtype, u32 workgroup_size, u32 subgroup_size) {
+    std::ostringstream ss;
+    const char* type = dtype_to_glsl(dtype);
+    ss << "#version 450\n";
+    ss << "#extension GL_KHR_shader_subgroup_arithmetic : enable\n";
+    ss << "layout(local_size_x = " << workgroup_size << ") in;\n\n";
+    ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
+    ss << ShaderGen::buffer_binding(1, "out_data", dtype, false);
+    ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
+    
+    u32 num_subgroups = workgroup_size / subgroup_size;
+    ss << "shared " << type << " subgroup_sums[" << num_subgroups << "];\n\n";
+    
+    ss << ShaderGen::main_begin();
+    ss << "    uint tid = gl_LocalInvocationID.x;\n";
+    ss << "    uint gid = gl_GlobalInvocationID.x;\n";
+    ss << "    " << type << " val = (gid < n) ? in_data[gid] : " << type << "(0);\n";
+    ss << "    " << type << " subgroup_sum = subgroupAdd(val);\n";
+    ss << "    if (gl_SubgroupInvocationID == 0)\n";
+    ss << "        subgroup_sums[gl_SubgroupID] = subgroup_sum;\n";
+    ss << "    barrier();\n";
+    ss << "    if (tid < " << num_subgroups << ") {\n";
+    ss << "        " << type << " partial = subgroup_sums[tid];\n";
+    if (num_subgroups > 1) {
+        ss << "        partial = subgroupAdd(partial);\n";
+    }
+    ss << "        if (tid == 0) out_data[gl_WorkGroupID.x] = partial;\n";
+    ss << "    }\n";
+    ss << ShaderGen::main_end();
+    return ss.str();
+}
+
+std::string max_shader_subgroup(DataType dtype, u32 workgroup_size, u32 subgroup_size) {
+    std::ostringstream ss;
+    const char* type = dtype_to_glsl(dtype);
+    const char* init = "-3.402823466e+38";
+    ss << "#version 450\n";
+    ss << "#extension GL_KHR_shader_subgroup_arithmetic : enable\n";
+    ss << "layout(local_size_x = " << workgroup_size << ") in;\n\n";
+    ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
+    ss << ShaderGen::buffer_binding(1, "out_data", dtype, false);
+    ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
+    
+    u32 num_subgroups = workgroup_size / subgroup_size;
+    ss << "shared " << type << " subgroup_results[" << num_subgroups << "];\n\n";
+    
+    ss << ShaderGen::main_begin();
+    ss << "    uint tid = gl_LocalInvocationID.x;\n";
+    ss << "    uint gid = gl_GlobalInvocationID.x;\n";
+    ss << "    " << type << " val = (gid < n) ? in_data[gid] : " << type << "(" << init << ");\n";
+    ss << "    " << type << " subgroup_max = subgroupMax(val);\n";
+    ss << "    if (gl_SubgroupInvocationID == 0)\n";
+    ss << "        subgroup_results[gl_SubgroupID] = subgroup_max;\n";
+    ss << "    barrier();\n";
+    ss << "    if (tid < " << num_subgroups << ") {\n";
+    ss << "        " << type << " partial = subgroup_results[tid];\n";
+    if (num_subgroups > 1) {
+        ss << "        partial = subgroupMax(partial);\n";
+    }
+    ss << "        if (tid == 0) out_data[gl_WorkGroupID.x] = partial;\n";
+    ss << "    }\n";
+    ss << ShaderGen::main_end();
+    return ss.str();
+}
+
+std::string min_shader_subgroup(DataType dtype, u32 workgroup_size, u32 subgroup_size) {
+    std::ostringstream ss;
+    const char* type = dtype_to_glsl(dtype);
+    const char* init = "3.402823466e+38";
+    ss << "#version 450\n";
+    ss << "#extension GL_KHR_shader_subgroup_arithmetic : enable\n";
+    ss << "layout(local_size_x = " << workgroup_size << ") in;\n\n";
+    ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
+    ss << ShaderGen::buffer_binding(1, "out_data", dtype, false);
+    ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
+    
+    u32 num_subgroups = workgroup_size / subgroup_size;
+    ss << "shared " << type << " subgroup_results[" << num_subgroups << "];\n\n";
+    
+    ss << ShaderGen::main_begin();
+    ss << "    uint tid = gl_LocalInvocationID.x;\n";
+    ss << "    uint gid = gl_GlobalInvocationID.x;\n";
+    ss << "    " << type << " val = (gid < n) ? in_data[gid] : " << type << "(" << init << ");\n";
+    ss << "    " << type << " subgroup_min = subgroupMin(val);\n";
+    ss << "    if (gl_SubgroupInvocationID == 0)\n";
+    ss << "        subgroup_results[gl_SubgroupID] = subgroup_min;\n";
+    ss << "    barrier();\n";
+    ss << "    if (tid < " << num_subgroups << ") {\n";
+    ss << "        " << type << " partial = subgroup_results[tid];\n";
+    if (num_subgroups > 1) {
+        ss << "        partial = subgroupMin(partial);\n";
+    }
+    ss << "        if (tid == 0) out_data[gl_WorkGroupID.x] = partial;\n";
+    ss << "    }\n";
+    ss << ShaderGen::main_end();
+    return ss.str();
 }
 
 std::string sum_shader(DataType dtype, u32 workgroup_size) {
@@ -148,9 +247,50 @@ std::shared_ptr<Tensor> reduce_full(Device& device, std::shared_ptr<Tensor> a, c
     return temp;
 }
 
+std::shared_ptr<Tensor> reduce_full_subgroup(Device& device, std::shared_ptr<Tensor> a, const std::string& op_name,
+                                              std::string(*shader_fn)(DataType, u32, u32), u32 subgroup_size) {
+    u32 wg_size = get_device_params(device).reduction_workgroup;
+    u64 n = a->numel();
+    u32 num_workgroups = static_cast<u32>((n + wg_size - 1) / wg_size);
+    
+    std::string key = op_name + "_sg_" + dtype_to_string(a->dtype()) + "_wg" + std::to_string(wg_size);
+    auto kernel = get_or_create_kernel(device, key, shader_fn(a->dtype(), wg_size, subgroup_size), 2, sizeof(u32));
+    
+    auto temp = device.create_tensor({num_workgroups}, a->dtype());
+    temp->zero();
+    
+    u32 count = static_cast<u32>(n);
+    kernel->bind(0, a);
+    kernel->bind(1, temp);
+    u32 groups = kernel->optimal_dispatch_1d(count);
+    kernel->execute(groups, 1, 1, &count);
+    device.synchronize();
+    
+    while (num_workgroups > 1) {
+        u32 next_workgroups = (num_workgroups + wg_size - 1) / wg_size;
+        auto next = device.create_tensor({next_workgroups}, a->dtype());
+        next->zero();
+        
+        kernel->bind(0, temp);
+        kernel->bind(1, next);
+        u32 g = kernel->optimal_dispatch_1d(num_workgroups);
+        kernel->execute(g, 1, 1, &num_workgroups);
+        device.synchronize();
+        
+        temp = next;
+        num_workgroups = next_workgroups;
+    }
+    
+    return temp;
+}
+
 }
 
 std::shared_ptr<Tensor> sum(Device& device, std::shared_ptr<Tensor> a) {
+    const auto& caps = device.capabilities();
+    if (caps.prefer_subgroup_reduce && caps.subgroup.arithmetic && caps.subgroup.size > 0) {
+        return reduce_full_subgroup(device, a, "reduce_sum", sum_shader_subgroup, caps.subgroup.size);
+    }
     return reduce_full(device, a, "reduce_sum", sum_shader);
 }
 
@@ -221,6 +361,10 @@ std::shared_ptr<Tensor> mean(Device& device, std::shared_ptr<Tensor> a, i32 axis
 }
 
 std::shared_ptr<Tensor> max(Device& device, std::shared_ptr<Tensor> a) {
+    const auto& caps = device.capabilities();
+    if (caps.prefer_subgroup_reduce && caps.subgroup.arithmetic && caps.subgroup.size > 0) {
+        return reduce_full_subgroup(device, a, "reduce_max", max_shader_subgroup, caps.subgroup.size);
+    }
     return reduce_full(device, a, "reduce_max", max_shader);
 }
 
@@ -230,6 +374,10 @@ std::shared_ptr<Tensor> max(Device& device, std::shared_ptr<Tensor> a, i32 axis,
 }
 
 std::shared_ptr<Tensor> min(Device& device, std::shared_ptr<Tensor> a) {
+    const auto& caps = device.capabilities();
+    if (caps.prefer_subgroup_reduce && caps.subgroup.arithmetic && caps.subgroup.size > 0) {
+        return reduce_full_subgroup(device, a, "reduce_min", min_shader_subgroup, caps.subgroup.size);
+    }
     return reduce_full(device, a, "reduce_min", min_shader);
 }
 

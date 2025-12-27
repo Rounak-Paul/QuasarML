@@ -8,7 +8,7 @@
 
 namespace QuasarML {
 
-class DeviceManager {
+class QS_API DeviceManager {
 public:
     static DeviceManager& instance();
     
