@@ -3,11 +3,55 @@
 #include <Core/Kernel.h>
 #include <Common/Assert.h>
 #include <sstream>
+#include <unordered_map>
 
 namespace QuasarML {
 namespace Ops {
 
 namespace {
+
+struct MatmulParams {
+    u32 tile_size;
+    u32 block_size;
+    u32 effective_tile;
+    bool use_register_blocking;
+};
+
+MatmulParams compute_optimal_matmul_params(const ComputeLimits& limits) {
+    MatmulParams params;
+    
+    u32 max_invocations = limits.max_workgroup_invocations;
+    u32 shared_mem = limits.max_shared_memory;
+    
+    if (max_invocations >= 1024 && shared_mem >= 32768) {
+        params.tile_size = 16;
+        params.block_size = 4;
+        params.use_register_blocking = true;
+    } else if (max_invocations >= 256 && shared_mem >= 16384) {
+        params.tile_size = 16;
+        params.block_size = 2;
+        params.use_register_blocking = true;
+    } else {
+        params.tile_size = 16;
+        params.block_size = 1;
+        params.use_register_blocking = false;
+    }
+    
+    params.effective_tile = params.tile_size * params.block_size;
+    return params;
+}
+
+std::unordered_map<u32, MatmulParams> s_device_params;
+
+const MatmulParams& get_matmul_params(Device& device) {
+    u32 idx = device.device_index();
+    auto it = s_device_params.find(idx);
+    if (it != s_device_params.end()) return it->second;
+    
+    auto limits = device.limits();
+    s_device_params[idx] = compute_optimal_matmul_params(limits);
+    return s_device_params[idx];
+}
 
 std::shared_ptr<Kernel> get_or_create_kernel(Device& device, const std::string& key, const std::string& code, u32 bindings, u32 push_size) {
     auto k = device.get_kernel(key);
@@ -15,61 +59,89 @@ std::shared_ptr<Kernel> get_or_create_kernel(Device& device, const std::string& 
     return device.create_kernel(key, code, bindings, push_size);
 }
 
-std::string matmul_shader(DataType dtype) {
+std::string matmul_shader_simple(DataType dtype, u32 tile_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
     ss << "#version 450\n";
-    ss << "#define TILE_SIZE 16\n";
-    ss << "#define BLOCK_SIZE 4\n";
-    ss << "layout(local_size_x = TILE_SIZE, local_size_y = TILE_SIZE, local_size_z = 1) in;\n\n";
+    ss << "layout(local_size_x = " << tile_size << ", local_size_y = " << tile_size << ") in;\n\n";
     ss << ShaderGen::buffer_binding(0, "A", dtype, true);
     ss << ShaderGen::buffer_binding(1, "B", dtype, true);
     ss << ShaderGen::buffer_binding(2, "C", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
-    ss << "shared " << type << " tile_a[2][TILE_SIZE][TILE_SIZE + 1];\n";
-    ss << "shared " << type << " tile_b[2][TILE_SIZE][TILE_SIZE + 1];\n\n";
+    ss << "shared " << type << " As[" << tile_size << "][" << tile_size << " + 1];\n";
+    ss << "shared " << type << " Bs[" << tile_size << "][" << tile_size << " + 1];\n\n";
+    ss << "void main() {\n";
+    ss << "    uint row = gl_GlobalInvocationID.y;\n";
+    ss << "    uint col = gl_GlobalInvocationID.x;\n";
+    ss << "    uint lr = gl_LocalInvocationID.y;\n";
+    ss << "    uint lc = gl_LocalInvocationID.x;\n";
+    ss << "    " << type << " acc = " << type << "(0);\n";
+    ss << "    uint tiles = (K + " << tile_size - 1 << ") / " << tile_size << ";\n";
+    ss << "    for (uint t = 0; t < tiles; t++) {\n";
+    ss << "        uint ak = t * " << tile_size << " + lc;\n";
+    ss << "        uint bk = t * " << tile_size << " + lr;\n";
+    ss << "        As[lr][lc] = (row < M && ak < K) ? A[row * K + ak] : " << type << "(0);\n";
+    ss << "        Bs[lr][lc] = (bk < K && col < N) ? B[bk * N + col] : " << type << "(0);\n";
+    ss << "        barrier();\n";
+    ss << "        for (uint k = 0; k < " << tile_size << "; k++) acc += As[lr][k] * Bs[k][lc];\n";
+    ss << "        barrier();\n";
+    ss << "    }\n";
+    ss << "    if (row < M && col < N) C[row * N + col] = acc;\n";
+    ss << "}\n";
+    return ss.str();
+}
+
+std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size) {
+    std::ostringstream ss;
+    const char* type = dtype_to_glsl(dtype);
+    ss << "#version 450\n";
+    ss << "#define TS " << tile_size << "\n";
+    ss << "#define BS " << block_size << "\n";
+    ss << "layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;\n\n";
+    ss << ShaderGen::buffer_binding(0, "A", dtype, true);
+    ss << ShaderGen::buffer_binding(1, "B", dtype, true);
+    ss << ShaderGen::buffer_binding(2, "C", dtype, false);
+    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
+    ss << "shared " << type << " tile_a[2][TS][TS + 1];\n";
+    ss << "shared " << type << " tile_b[2][TS][TS + 1];\n\n";
     ss << "void main() {\n";
     ss << "    uint local_row = gl_LocalInvocationID.x;\n";
     ss << "    uint local_col = gl_LocalInvocationID.y;\n";
-    ss << "    uint base_row = gl_WorkGroupID.x * (TILE_SIZE * BLOCK_SIZE);\n";
-    ss << "    uint base_col = gl_WorkGroupID.y * (TILE_SIZE * BLOCK_SIZE);\n";
-    ss << "    " << type << " acc[BLOCK_SIZE][BLOCK_SIZE];\n";
-    ss << "    for (uint i = 0; i < BLOCK_SIZE; ++i) {\n";
-    ss << "        for (uint j = 0; j < BLOCK_SIZE; ++j) {\n";
-    ss << "            acc[i][j] = " << type << "(0);\n";
-    ss << "        }\n";
-    ss << "    }\n";
-    ss << "    uint num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;\n";
+    ss << "    uint base_row = gl_WorkGroupID.x * (TS * BS);\n";
+    ss << "    uint base_col = gl_WorkGroupID.y * (TS * BS);\n";
+    ss << "    " << type << " acc[BS][BS];\n";
+    ss << "    for (uint i = 0; i < BS; ++i) for (uint j = 0; j < BS; ++j) acc[i][j] = " << type << "(0);\n";
+    ss << "    uint num_tiles = (K + TS - 1) / TS;\n";
     ss << "    for (uint t = 0; t < num_tiles; ++t) {\n";
-    ss << "        uint tile_k = t * TILE_SIZE;\n";
-    ss << "        for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n";
-    ss << "            uint row = base_row + bi * TILE_SIZE + local_row;\n";
+    ss << "        uint tile_k = t * TS;\n";
+    ss << "        for (uint bi = 0; bi < BS; ++bi) {\n";
+    ss << "            uint row = base_row + bi * TS + local_row;\n";
     ss << "            uint col_k = tile_k + local_col;\n";
     ss << "            tile_a[bi % 2][local_row][local_col] = (row < M && col_k < K) ? A[row * K + col_k] : " << type << "(0);\n";
     ss << "        }\n";
-    ss << "        for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n";
+    ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
     ss << "            uint row_k = tile_k + local_row;\n";
-    ss << "            uint col = base_col + bj * TILE_SIZE + local_col;\n";
+    ss << "            uint col = base_col + bj * TS + local_col;\n";
     ss << "            tile_b[bj % 2][local_row][local_col] = (row_k < K && col < N) ? B[row_k * N + col] : " << type << "(0);\n";
     ss << "        }\n";
     ss << "        barrier();\n";
-    ss << "        for (uint k = 0; k < TILE_SIZE; k += 4) {\n";
-    ss << "            " << type << " a_reg[BLOCK_SIZE][4];\n";
-    ss << "            " << type << " b_reg[BLOCK_SIZE][4];\n";
-    ss << "            for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n";
+    ss << "        for (uint k = 0; k < TS; k += 4) {\n";
+    ss << "            " << type << " a_reg[BS][4];\n";
+    ss << "            " << type << " b_reg[BS][4];\n";
+    ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
     ss << "                a_reg[bi][0] = tile_a[bi % 2][local_row][k];\n";
     ss << "                a_reg[bi][1] = tile_a[bi % 2][local_row][k + 1];\n";
     ss << "                a_reg[bi][2] = tile_a[bi % 2][local_row][k + 2];\n";
     ss << "                a_reg[bi][3] = tile_a[bi % 2][local_row][k + 3];\n";
     ss << "            }\n";
-    ss << "            for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n";
+    ss << "            for (uint bj = 0; bj < BS; ++bj) {\n";
     ss << "                b_reg[bj][0] = tile_b[bj % 2][k][local_col];\n";
     ss << "                b_reg[bj][1] = tile_b[bj % 2][k + 1][local_col];\n";
     ss << "                b_reg[bj][2] = tile_b[bj % 2][k + 2][local_col];\n";
     ss << "                b_reg[bj][3] = tile_b[bj % 2][k + 3][local_col];\n";
     ss << "            }\n";
-    ss << "            for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n";
-    ss << "                for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n";
+    ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
+    ss << "                for (uint bj = 0; bj < BS; ++bj) {\n";
     ss << "                    acc[bi][bj] += a_reg[bi][0] * b_reg[bj][0];\n";
     ss << "                    acc[bi][bj] += a_reg[bi][1] * b_reg[bj][1];\n";
     ss << "                    acc[bi][bj] += a_reg[bi][2] * b_reg[bj][2];\n";
@@ -79,10 +151,10 @@ std::string matmul_shader(DataType dtype) {
     ss << "        }\n";
     ss << "        barrier();\n";
     ss << "    }\n";
-    ss << "    for (uint bi = 0; bi < BLOCK_SIZE; ++bi) {\n";
-    ss << "        for (uint bj = 0; bj < BLOCK_SIZE; ++bj) {\n";
-    ss << "            uint out_row = base_row + bi * TILE_SIZE + local_row;\n";
-    ss << "            uint out_col = base_col + bj * TILE_SIZE + local_col;\n";
+    ss << "    for (uint bi = 0; bi < BS; ++bi) {\n";
+    ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
+    ss << "            uint out_row = base_row + bi * TS + local_row;\n";
+    ss << "            uint out_col = base_col + bj * TS + local_col;\n";
     ss << "            if (out_row < M && out_col < N) C[out_row * N + out_col] = acc[bi][bj];\n";
     ss << "        }\n";
     ss << "    }\n";
@@ -159,19 +231,28 @@ std::shared_ptr<Tensor> matmul(Device& device, std::shared_ptr<Tensor> a, std::s
     u32 M = a->dim(0), K = a->dim(1), N = b->dim(1);
     auto result = device.create_tensor({M, N}, a->dtype());
     
-    std::string key = "matmul_" + std::string(dtype_to_string(a->dtype()));
+    const auto& params = get_matmul_params(device);
+    
+    std::string key = "matmul_" + std::string(dtype_to_string(a->dtype())) + 
+                      "_t" + std::to_string(params.tile_size) + 
+                      "_b" + std::to_string(params.block_size);
+    
+    std::string shader_code;
+    if (params.use_register_blocking) {
+        shader_code = matmul_shader_blocked(a->dtype(), params.tile_size, params.block_size);
+    } else {
+        shader_code = matmul_shader_simple(a->dtype(), params.tile_size);
+    }
+    
     struct { u32 M; u32 K; u32 N; } pc = { M, K, N };
-    auto kernel = get_or_create_kernel(device, key, matmul_shader(a->dtype()), 3, sizeof(pc));
+    auto kernel = get_or_create_kernel(device, key, shader_code, 3, sizeof(pc));
     
     kernel->bind(0, a);
     kernel->bind(1, b);
     kernel->bind(2, result);
     
-    constexpr u32 TILE_SIZE = 16;
-    constexpr u32 BLOCK_SIZE = 4;
-    constexpr u32 EFFECTIVE_TILE = TILE_SIZE * BLOCK_SIZE;
-    u32 gx = (M + EFFECTIVE_TILE - 1) / EFFECTIVE_TILE;
-    u32 gy = (N + EFFECTIVE_TILE - 1) / EFFECTIVE_TILE;
+    u32 gx = (M + params.effective_tile - 1) / params.effective_tile;
+    u32 gy = (N + params.effective_tile - 1) / params.effective_tile;
     kernel->execute(gx, gy, 1, &pc);
     device.synchronize();
     
