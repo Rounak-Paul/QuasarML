@@ -13,11 +13,9 @@
 
 namespace QuasarML {
 
-// forward declarations for helpers used by scalar fast-paths
 static float half_to_float(uint16_t h);
 static std::pair<std::array<u8,4>, u32> make_push_constant(const u8* buf, DataType dtype);
 
-// helper: convert float -> IEEE-754 half (16-bit)
 static uint16_t float_to_half(float f) {
     uint32_t x;
     std::memcpy(&x, &f, sizeof(float));
@@ -30,166 +28,15 @@ static uint16_t float_to_half(float f) {
         if (mantissa & 0x00001000u) mantissa += 0x00002000u;
         return static_cast<uint16_t>(sign | (mantissa >> 13));
     } else if (exp == 0xFF - (127 - 15)) {
-        if (mantissa == 0) return static_cast<uint16_t>(sign | 0x7C00u); // inf
-        else return static_cast<uint16_t>(sign | 0x7C00u | (mantissa ? 0x0200u : 0)); // NaN
+        if (mantissa == 0) return static_cast<uint16_t>(sign | 0x7C00u);
+        else return static_cast<uint16_t>(sign | 0x7C00u | (mantissa ? 0x0200u : 0));
     } else {
         if (exp > 30) {
-            // overflow -> inf
             return static_cast<uint16_t>(sign | 0x7C00u);
         }
         uint16_t h = static_cast<uint16_t>(sign | (static_cast<uint32_t>(exp) << 10) | (mantissa >> 13));
         return h;
     }
-}
-
-// Generic CPU elementwise helper for equal-shaped tensors. Supports all DataType enum entries.
-static std::shared_ptr<Tensor> cpu_elementwise_equal(Accelerator& acc,
-                                                    std::shared_ptr<Tensor> a,
-                                                    std::shared_ptr<Tensor> b,
-                                                    DataType dtype,
-                                                    const std::function<void(const void*, const void*, void*, u64)>& op_bytewise) {
-    // op_bytewise operates on raw arrays of bytes where element size = get_dtype_size(dtype)
-    u64 count = a->get_element_count();
-    u32 esize = get_dtype_size(dtype);
-    std::vector<u8> a_buf(count * esize);
-    std::vector<u8> b_buf(count * esize);
-    std::vector<u8> out_buf(count * esize);
-    // notify accelerator that a CPU fallback path is executing
-    acc.notify_cpu_fallback();
-    a->download_data(a_buf.data());
-    b->download_data(b_buf.data());
-    // call op which should handle element conversions internally
-    op_bytewise(a_buf.data(), b_buf.data(), out_buf.data(), count);
-    return acc.create_tensor(out_buf.data(), a->get_shape(), dtype, /*device_only=*/false);
-}
-
-// Generic CPU broadcast helper for binary ops (+ - * /) across all datatypes.
-static std::shared_ptr<Tensor> cpu_broadcast_binary(Accelerator& acc,
-                                                   std::shared_ptr<Tensor> a,
-                                                   std::shared_ptr<Tensor> b,
-                                                   const std::vector<u32>& out_shape,
-                                                   DataType dtype,
-                                                   char op) {
-    // element size
-    u32 esz = get_dtype_size(dtype);
-    u64 out_count = calculate_element_count(out_shape);
-
-    u64 a_count = a->get_element_count();
-    u64 b_count = b->get_element_count();
-    std::vector<u8> a_buf(a_count * esz);
-    std::vector<u8> b_buf(b_count * esz);
-    std::vector<u8> out_buf(out_count * esz);
-    // CPU fallback execution instrumentation
-    acc.notify_cpu_fallback();
-    a->download_data(a_buf.data());
-    b->download_data(b_buf.data());
-
-    auto flat_from_idx = [](const std::vector<u32>& shape, const std::vector<u32>& idx)->u64{
-        u64 flat = 0; u64 stride = 1;
-        for (int i = static_cast<int>(shape.size()) - 1; i >= 0; --i) {
-            flat += static_cast<u64>(idx[i]) * stride;
-            stride *= shape[i];
-        }
-        return flat;
-    };
-
-    std::vector<u32> idx(out_shape.size());
-    std::vector<u32> a_shape = a->get_shape();
-    std::vector<u32> b_shape = b->get_shape();
-
-    for (u64 i = 0; i < out_count; ++i) {
-        // unravel into multi-dim index
-        u64 rem = i; u64 denom = out_count;
-        for (size_t d = 0; d < out_shape.size(); ++d) {
-            denom /= out_shape[d];
-            idx[d] = static_cast<u32>(rem / denom);
-            rem = rem % denom;
-        }
-
-        // map to a/b coords (right align shapes)
-        std::vector<u32> a_idx(a_shape.size()), b_idx(b_shape.size());
-        for (int d = 0; d < static_cast<int>(a_shape.size()); ++d) {
-            int od = static_cast<int>(out_shape.size()) - static_cast<int>(a_shape.size()) + d;
-            if (od < 0) a_idx[d] = 0; else a_idx[d] = (a_shape[d] == 1) ? 0 : idx[od];
-        }
-        for (int d = 0; d < static_cast<int>(b_shape.size()); ++d) {
-            int od = static_cast<int>(out_shape.size()) - static_cast<int>(b_shape.size()) + d;
-            if (od < 0) b_idx[d] = 0; else b_idx[d] = (b_shape[d] == 1) ? 0 : idx[od];
-        }
-
-        u64 a_flat = flat_from_idx(a_shape, a_idx);
-        u64 b_flat = flat_from_idx(b_shape, b_idx);
-
-        const u8* ap = a_buf.data() + a_flat * esz;
-        const u8* bp = b_buf.data() + b_flat * esz;
-        u8* optr = out_buf.data() + i * esz;
-
-        // perform per-dtype operation
-        switch (dtype) {
-            case DataType::F32: {
-                float va; float vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                float vr = 0.0f;
-                if (op == '+') vr = va + vb; else if (op == '-') vr = va - vb; else if (op == '*') vr = va * vb; else if (op == '/') vr = va / vb;
-                std::memcpy(optr, &vr, 4);
-                break;
-            }
-            case DataType::F16: {
-                uint16_t ha, hb; std::memcpy(&ha, ap, 2); std::memcpy(&hb, bp, 2);
-                float fa = half_to_float(ha); float fb = half_to_float(hb);
-                float fr = 0.0f;
-                if (op == '+') fr = fa + fb; else if (op == '-') fr = fa - fb; else if (op == '*') fr = fa * fb; else if (op == '/') fr = fa / fb;
-                uint16_t hr = float_to_half(fr);
-                std::memcpy(optr, &hr, 2);
-                break;
-            }
-            case DataType::I32: {
-                int32_t va; int32_t vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                int32_t vr = 0;
-                if (op == '+') vr = va + vb; else if (op == '-') vr = va - vb; else if (op == '*') vr = va * vb; else if (op == '/') vr = va / vb;
-                std::memcpy(optr, &vr, 4);
-                break;
-            }
-            case DataType::U32: {
-                uint32_t va; uint32_t vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                uint32_t vr = 0;
-                if (op == '+') vr = va + vb; else if (op == '-') vr = va - vb; else if (op == '*') vr = va * vb; else if (op == '/') vr = va / vb;
-                std::memcpy(optr, &vr, 4);
-                break;
-            }
-            case DataType::I16: {
-                int16_t va; int16_t vb; std::memcpy(&va, ap, 2); std::memcpy(&vb, bp, 2);
-                int16_t vr = 0;
-                if (op == '+') vr = static_cast<int16_t>(va + vb); else if (op == '-') vr = static_cast<int16_t>(va - vb); else if (op == '*') vr = static_cast<int16_t>(va * vb); else if (op == '/') vr = static_cast<int16_t>(va / vb);
-                std::memcpy(optr, &vr, 2);
-                break;
-            }
-            case DataType::U16: {
-                uint16_t va; uint16_t vb; std::memcpy(&va, ap, 2); std::memcpy(&vb, bp, 2);
-                uint16_t vr = 0;
-                if (op == '+') vr = static_cast<uint16_t>(va + vb); else if (op == '-') vr = static_cast<uint16_t>(va - vb); else if (op == '*') vr = static_cast<uint16_t>(va * vb); else if (op == '/') vr = static_cast<uint16_t>(va / vb);
-                std::memcpy(optr, &vr, 2);
-                break;
-            }
-            case DataType::I8: {
-                int8_t va; int8_t vb; std::memcpy(&va, ap, 1); std::memcpy(&vb, bp, 1);
-                int8_t vr = 0;
-                if (op == '+') vr = static_cast<int8_t>(va + vb); else if (op == '-') vr = static_cast<int8_t>(va - vb); else if (op == '*') vr = static_cast<int8_t>(va * vb); else if (op == '/') vr = static_cast<int8_t>(va / vb);
-                std::memcpy(optr, &vr, 1);
-                break;
-            }
-            case DataType::U8: {
-                uint8_t va; uint8_t vb; std::memcpy(&va, ap, 1); std::memcpy(&vb, bp, 1);
-                uint8_t vr = 0;
-                if (op == '+') vr = static_cast<uint8_t>(va + vb); else if (op == '-') vr = static_cast<uint8_t>(va - vb); else if (op == '*') vr = static_cast<uint8_t>(va * vb); else if (op == '/') vr = static_cast<uint8_t>(va / vb);
-                std::memcpy(optr, &vr, 1);
-                break;
-            }
-            default:
-                break;
-        }
-    }
-
-    return acc.create_tensor(out_buf.data(), out_shape, dtype, /*device_only=*/false);
 }
 
 std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::shared_ptr<Tensor> b) {
@@ -205,10 +52,6 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
 
         DataType dtype = a->get_dtype();
         // If accelerator is in CPU mode, perform CPU broadcasting implementation
-        if (!_accelerator.use_gpu()) {
-            // CPU broadcast implementation supporting all datatypes
-            return cpu_broadcast_binary(_accelerator, a, b, out_shape, dtype, '+');
-        }
 
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
@@ -257,66 +100,6 @@ std::shared_ptr<Tensor> TensorOperations::add(std::shared_ptr<Tensor> a, std::sh
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
-    if (!_accelerator.use_gpu()) {
-        // CPU generic elementwise for equal-shaped tensors (supports all datatypes)
-            // Provide a wrapper that operates on raw byte arrays for the tensor's dtype
-            auto op_wrapper = [this, a](const void* A, const void* B, void* O, u64 cnt) {
-                DataType dt = a->get_dtype();
-                u32 esz = get_dtype_size(dt);
-                for (u64 i = 0; i < cnt; ++i) {
-                    const u8* ap = reinterpret_cast<const u8*>(A) + i * esz;
-                    const u8* bp = reinterpret_cast<const u8*>(B) + i * esz;
-                    u8* outp = reinterpret_cast<u8*>(O) + i * esz;
-                    switch (dt) {
-                        case DataType::F32: {
-                            float va, vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                            float r = va + vb; std::memcpy(outp, &r, 4);
-                            break;
-                        }
-                        case DataType::F16: {
-                            uint16_t ha, hb; std::memcpy(&ha, ap, 2); std::memcpy(&hb, bp, 2);
-                            float fa = half_to_float(ha); float fb = half_to_float(hb);
-                            float fr = fa + fb; uint16_t hr = float_to_half(fr);
-                            std::memcpy(outp, &hr, 2);
-                            break;
-                        }
-                        case DataType::I32: {
-                            int32_t va, vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                            int32_t r = va + vb; std::memcpy(outp, &r, 4);
-                            break;
-                        }
-                        case DataType::U32: {
-                            uint32_t va, vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4);
-                            uint32_t r = va + vb; std::memcpy(outp, &r, 4);
-                            break;
-                        }
-                        case DataType::I16: {
-                            int16_t va, vb; std::memcpy(&va, ap, 2); std::memcpy(&vb, bp, 2);
-                            int16_t r = static_cast<int16_t>(va + vb); std::memcpy(outp, &r, 2);
-                            break;
-                        }
-                        case DataType::U16: {
-                            uint16_t va, vb; std::memcpy(&va, ap, 2); std::memcpy(&vb, bp, 2);
-                            uint16_t r = static_cast<uint16_t>(va + vb); std::memcpy(outp, &r, 2);
-                            break;
-                        }
-                        case DataType::I8: {
-                            int8_t va, vb; std::memcpy(&va, ap, 1); std::memcpy(&vb, bp, 1);
-                            int8_t r = static_cast<int8_t>(va + vb); std::memcpy(outp, &r, 1);
-                            break;
-                        }
-                        case DataType::U8: {
-                            uint8_t va, vb; std::memcpy(&va, ap, 1); std::memcpy(&vb, bp, 1);
-                            uint8_t r = static_cast<uint8_t>(va + vb); std::memcpy(outp, &r, 1);
-                            break;
-                        }
-                        default:
-                            break;
-                    }
-                }
-            };
-        return cpu_elementwise_equal(_accelerator, a, b, a->get_dtype(), op_wrapper);
-    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("add", a->get_dtype());
@@ -339,9 +122,6 @@ std::shared_ptr<Tensor> TensorOperations::sub(std::shared_ptr<Tensor> a, std::sh
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
-        if (!_accelerator.use_gpu()) {
-            return cpu_broadcast_binary(_accelerator, a, b, out_shape, dtype, '-');
-        }
 
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
@@ -386,28 +166,6 @@ std::shared_ptr<Tensor> TensorOperations::sub(std::shared_ptr<Tensor> a, std::sh
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
-    if (!_accelerator.use_gpu()) {
-            auto op_wrapper = [this, a](const void* A, const void* B, void* O, u64 cnt) {
-                DataType dt = a->get_dtype(); u32 esz = get_dtype_size(dt);
-                for (u64 i=0;i<cnt;++i) {
-                    const u8* ap = reinterpret_cast<const u8*>(A) + i * esz;
-                    const u8* bp = reinterpret_cast<const u8*>(B) + i * esz;
-                    u8* op = reinterpret_cast<u8*>(O) + i * esz;
-                    switch (dt) {
-                        case DataType::F32: { float va; float vb; std::memcpy(&va, ap, 4); std::memcpy(&vb, bp, 4); float r = va - vb; std::memcpy(op, &r, 4); break; }
-                        case DataType::F16: { uint16_t ha,hb; std::memcpy(&ha,ap,2); std::memcpy(&hb,bp,2); float fr = half_to_float(ha) - half_to_float(hb); uint16_t hr = float_to_half(fr); std::memcpy(op,&hr,2); break; }
-                        case DataType::I32: { int32_t va; int32_t vb; std::memcpy(&va,ap,4); std::memcpy(&vb,bp,4); int32_t r = va - vb; std::memcpy(op,&r,4); break; }
-                        case DataType::U32: { uint32_t va; uint32_t vb; std::memcpy(&va,ap,4); std::memcpy(&vb,bp,4); uint32_t r = va - vb; std::memcpy(op,&r,4); break; }
-                        case DataType::I16: { int16_t va; int16_t vb; std::memcpy(&va,ap,2); std::memcpy(&vb,bp,2); int16_t r = static_cast<int16_t>(va - vb); std::memcpy(op,&r,2); break; }
-                        case DataType::U16: { uint16_t va; uint16_t vb; std::memcpy(&va,ap,2); std::memcpy(&vb,bp,2); uint16_t r = static_cast<uint16_t>(va - vb); std::memcpy(op,&r,2); break; }
-                        case DataType::I8: { int8_t va; int8_t vb; std::memcpy(&va,ap,1); std::memcpy(&vb,bp,1); int8_t r = static_cast<int8_t>(va - vb); std::memcpy(op,&r,1); break; }
-                        case DataType::U8: { uint8_t va; uint8_t vb; std::memcpy(&va,ap,1); std::memcpy(&vb,bp,1); uint8_t r = static_cast<uint8_t>(va - vb); std::memcpy(op,&r,1); break; }
-                        default: break;
-                    }
-                }
-            };
-        return cpu_elementwise_equal(_accelerator, a, b, a->get_dtype(), op_wrapper);
-    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("sub", a->get_dtype());
@@ -429,9 +187,6 @@ std::shared_ptr<Tensor> TensorOperations::mul(std::shared_ptr<Tensor> a, std::sh
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
-        if (!_accelerator.use_gpu()) {
-            return cpu_broadcast_binary(_accelerator, a, b, out_shape, dtype, '*');
-        }
 
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
@@ -476,15 +231,6 @@ std::shared_ptr<Tensor> TensorOperations::mul(std::shared_ptr<Tensor> a, std::sh
 
     if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
-    if (!_accelerator.use_gpu()) {
-        // instrumentation
-        _accelerator.notify_cpu_fallback();
-        if (a->get_dtype() != DataType::F32 || b->get_dtype() != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
-        u64 count = a->get_element_count(); std::vector<float> a_buf(count), b_buf(count), out_buf(count);
-        a->download_data(a_buf.data()); b->download_data(b_buf.data());
-        for (u64 i=0;i<count;++i) out_buf[i]=a_buf[i]*b_buf[i];
-        return _accelerator.create_tensor(out_buf.data(), a->get_shape(), a->get_dtype(), false);
-    }
 
     auto result = _accelerator.create_tensor(a->get_shape(), a->get_dtype());
     std::string kernel_name = get_kernel_name_for_dtype("mul", a->get_dtype());
@@ -506,9 +252,6 @@ std::shared_ptr<Tensor> TensorOperations::div(std::shared_ptr<Tensor> a, std::sh
         if (a->get_dtype() != b->get_dtype()) throw std::invalid_argument("Tensors must have the same data type");
 
         DataType dtype = a->get_dtype();
-        if (!_accelerator.use_gpu()) {
-            return cpu_broadcast_binary(_accelerator, a, b, out_shape, dtype, '/');
-        }
 
         auto result = _accelerator.create_tensor(out_shape, dtype);
 
@@ -568,29 +311,6 @@ std::shared_ptr<Tensor> TensorOperations::add_scalar(std::shared_ptr<Tensor> ten
     }
     
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        // Generic scalar add on CPU for all data types
-        auto op_scalar_add = [this, tensor, scalar](const void* A, const void* B, void* O, u64 cnt) {
-            // B is unused; scalar captured
-            DataType dt = tensor->get_dtype(); u32 esz = get_dtype_size(dt);
-            for (u64 i=0;i<cnt;++i) {
-                const u8* ap = reinterpret_cast<const u8*>(A) + i * esz;
-                u8* op = reinterpret_cast<u8*>(O) + i * esz;
-                switch (dt) {
-                    case DataType::F32: { float v; std::memcpy(&v, ap, 4); float r = v + scalar; std::memcpy(op, &r, 4); break; }
-                    case DataType::F16: { uint16_t h; std::memcpy(&h, ap, 2); float fv = half_to_float(h); float fr = fv + scalar; uint16_t hr = float_to_half(fr); std::memcpy(op, &hr, 2); break; }
-                    case DataType::I32: { int32_t v; std::memcpy(&v, ap, 4); int32_t r = static_cast<int32_t>(v + static_cast<int32_t>(scalar)); std::memcpy(op, &r, 4); break; }
-                    case DataType::U32: { uint32_t v; std::memcpy(&v, ap, 4); uint32_t r = static_cast<uint32_t>(v + static_cast<uint32_t>(scalar)); std::memcpy(op, &r, 4); break; }
-                    case DataType::I16: { int16_t v; std::memcpy(&v, ap, 2); int16_t r = static_cast<int16_t>(v + static_cast<int16_t>(scalar)); std::memcpy(op, &r, 2); break; }
-                    case DataType::U16: { uint16_t v; std::memcpy(&v, ap, 2); uint16_t r = static_cast<uint16_t>(v + static_cast<uint16_t>(scalar)); std::memcpy(op, &r, 2); break; }
-                    case DataType::I8: { int8_t v; std::memcpy(&v, ap, 1); int8_t r = static_cast<int8_t>(v + static_cast<int8_t>(scalar)); std::memcpy(op, &r, 1); break; }
-                    case DataType::U8: { uint8_t v; std::memcpy(&v, ap, 1); uint8_t r = static_cast<uint8_t>(v + static_cast<uint8_t>(scalar)); std::memcpy(op, &r, 1); break; }
-                    default: break;
-                }
-            }
-        };
-        return cpu_elementwise_equal(_accelerator, tensor, tensor, dtype, op_scalar_add);
-    }
 
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
@@ -611,27 +331,6 @@ std::shared_ptr<Tensor> TensorOperations::mul_scalar(std::shared_ptr<Tensor> ten
     }
     
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        auto op_scalar_mul = [this, tensor, scalar](const void* A, const void* B, void* O, u64 cnt) {
-            DataType dt = tensor->get_dtype(); u32 esz = get_dtype_size(dt);
-            for (u64 i=0;i<cnt;++i) {
-                const u8* ap = reinterpret_cast<const u8*>(A) + i * esz;
-                u8* op = reinterpret_cast<u8*>(O) + i * esz;
-                switch (dt) {
-                    case DataType::F32: { float v; std::memcpy(&v, ap, 4); float r = v * scalar; std::memcpy(op, &r, 4); break; }
-                    case DataType::F16: { uint16_t h; std::memcpy(&h, ap, 2); float fv = half_to_float(h); float fr = fv * scalar; uint16_t hr = float_to_half(fr); std::memcpy(op, &hr, 2); break; }
-                    case DataType::I32: { int32_t v; std::memcpy(&v, ap, 4); int32_t r = static_cast<int32_t>(v * static_cast<int32_t>(scalar)); std::memcpy(op, &r, 4); break; }
-                    case DataType::U32: { uint32_t v; std::memcpy(&v, ap, 4); uint32_t r = static_cast<uint32_t>(v * static_cast<uint32_t>(scalar)); std::memcpy(op, &r, 4); break; }
-                    case DataType::I16: { int16_t v; std::memcpy(&v, ap, 2); int16_t r = static_cast<int16_t>(v * static_cast<int16_t>(scalar)); std::memcpy(op, &r, 2); break; }
-                    case DataType::U16: { uint16_t v; std::memcpy(&v, ap, 2); uint16_t r = static_cast<uint16_t>(v * static_cast<uint16_t>(scalar)); std::memcpy(op, &r, 2); break; }
-                    case DataType::I8: { int8_t v; std::memcpy(&v, ap, 1); int8_t r = static_cast<int8_t>(v * static_cast<int8_t>(scalar)); std::memcpy(op, &r, 1); break; }
-                    case DataType::U8: { uint8_t v; std::memcpy(&v, ap, 1); uint8_t r = static_cast<uint8_t>(v * static_cast<uint8_t>(scalar)); std::memcpy(op, &r, 1); break; }
-                    default: break;
-                }
-            }
-        };
-        return cpu_elementwise_equal(_accelerator, tensor, tensor, dtype, op_scalar_mul);
-    }
 
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
@@ -652,27 +351,6 @@ std::shared_ptr<Tensor> TensorOperations::relu(std::shared_ptr<Tensor> tensor) {
     }
     
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        auto op_relu = [this, tensor](const void* A, const void* B, void* O, u64 cnt) {
-            DataType dt = tensor->get_dtype(); u32 esz = get_dtype_size(dt);
-            for (u64 i=0;i<cnt;++i) {
-                const u8* ap = reinterpret_cast<const u8*>(A) + i * esz;
-                u8* op = reinterpret_cast<u8*>(O) + i * esz;
-                switch (dt) {
-                    case DataType::F32: { float v; std::memcpy(&v, ap, 4); float r = std::max(0.0f, v); std::memcpy(op, &r, 4); break; }
-                    case DataType::F16: { uint16_t h; std::memcpy(&h, ap, 2); float fv = half_to_float(h); float fr = std::max(0.0f, fv); uint16_t hr = float_to_half(fr); std::memcpy(op, &hr, 2); break; }
-                    case DataType::I32: { int32_t v; std::memcpy(&v, ap, 4); int32_t r = std::max(0, v); std::memcpy(op, &r, 4); break; }
-                    case DataType::U32: { uint32_t v; std::memcpy(&v, ap, 4); uint32_t r = v; std::memcpy(op, &r, 4); break; }
-                    case DataType::I16: { int16_t v; std::memcpy(&v, ap, 2); int16_t r = static_cast<int16_t>(std::max(0, static_cast<int>(v))); std::memcpy(op, &r, 2); break; }
-                    case DataType::U16: { uint16_t v; std::memcpy(&v, ap, 2); uint16_t r = v; std::memcpy(op, &r, 2); break; }
-                    case DataType::I8: { int8_t v; std::memcpy(&v, ap, 1); int8_t r = static_cast<int8_t>(std::max(0, static_cast<int>(v))); std::memcpy(op, &r, 1); break; }
-                    case DataType::U8: { uint8_t v; std::memcpy(&v, ap, 1); uint8_t r = v; std::memcpy(op, &r, 1); break; }
-                    default: break;
-                }
-            }
-        };
-        return cpu_elementwise_equal(_accelerator, tensor, tensor, dtype, op_relu);
-    }
 
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     
@@ -704,13 +382,6 @@ std::shared_ptr<Tensor> TensorOperations::matmul(std::shared_ptr<Tensor> a, std:
     DataType dtype = a->get_dtype();
     std::vector<u32> result_shape = {a_shape[0], b_shape[1]};
     
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
-        u32 M = a_shape[0]; u32 K = a_shape[1]; u32 N = b_shape[1]; std::vector<float> A(M*K), B(K*N), C(M*N);
-        a->download_data(A.data()); b->download_data(B.data()); for (u32 i=0;i<M;++i) for (u32 j=0;j<N;++j){ float s=0; for (u32 k=0;k<K;++k) s+=A[i*K+k]*B[k*N+j]; C[i*N+j]=s; }
-        return _accelerator.create_tensor(C.data(), result_shape, dtype, false);
-    }
 
     auto result = _accelerator.create_tensor(result_shape, dtype);
     
@@ -747,12 +418,6 @@ std::shared_ptr<Tensor> TensorOperations::transpose(std::shared_ptr<Tensor> tens
     std::vector<u32> result_shape = {input_shape[1], input_shape[0]};
     
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
-        u32 rows = input_shape[0], cols = input_shape[1]; std::vector<float> in(rows*cols), out(rows*cols);
-        tensor->download_data(in.data()); for (u32 r=0;r<rows;++r) for (u32 c=0;c<cols;++c) out[c*rows + r] = in[r*cols + c]; return _accelerator.create_tensor(out.data(), result_shape, dtype, false);
-    }
 
     auto result = _accelerator.create_tensor(result_shape, dtype);
     
@@ -783,17 +448,6 @@ std::shared_ptr<Tensor> TensorOperations::sum_axis(std::shared_ptr<Tensor> tenso
         u32 expected_result_size = (axis == 0) ? input_shape[1] : input_shape[0];
         std::vector<u32> result_shape = {expected_result_size};
         DataType dtype = tensor->get_dtype();
-            if (!_accelerator.use_gpu()) {
-                if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
-                u64 out_count = calculate_element_count(result_shape); std::vector<float> in(tensor->get_element_count()); tensor->download_data(in.data()); std::vector<float> out(out_count, 0.0f);
-                // naive reduce over axis
-                auto shape = tensor->get_shape(); std::vector<u32> idx(shape.size()); u64 total = tensor->get_element_count(); for (u64 i=0;i<total;++i){ // unravel
-                    u64 rem=i, denom=total; for (size_t d=0; d<shape.size(); ++d){ denom/=shape[d]; idx[d]=static_cast<u32>(rem/denom); rem%=denom; }
-                    // compute output index
-                    u64 out_flat=0, out_stride=1; for (int d=static_cast<int>(shape.size())-1; d>=0; --d){ if (static_cast<u32>(d)!=axis){ out_flat += static_cast<u64>(idx[d])*out_stride; out_stride *= (d < static_cast<int>(result_shape.size()) ? result_shape[d - (d>axis?1:0)] : 1); } }
-                    out[out_flat] += in[i]; }
-                return _accelerator.create_tensor(out.data(), result_shape, dtype, false);
-            }
 
         auto result = _accelerator.create_tensor(result_shape, dtype);
         std::string kernel_name = get_kernel_name_for_dtype("sum_axis", dtype);
@@ -868,42 +522,6 @@ std::shared_ptr<Tensor> TensorOperations::layer_norm(std::shared_ptr<Tensor> ten
     }
     
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32");
-        
-        std::vector<float> x_data(batch_size * feature_dim);
-        std::vector<float> gamma_data(feature_dim);
-        std::vector<float> beta_data(feature_dim);
-        std::vector<float> output(batch_size * feature_dim);
-        
-        tensor->download_data(x_data.data());
-        gamma->download_data(gamma_data.data());
-        beta->download_data(beta_data.data());
-        
-        for (u32 i = 0; i < batch_size; i++) {
-            float mean = 0.0f;
-            for (u32 j = 0; j < feature_dim; j++) {
-                mean += x_data[i * feature_dim + j];
-            }
-            mean /= feature_dim;
-            
-            float var = 0.0f;
-            for (u32 j = 0; j < feature_dim; j++) {
-                float diff = x_data[i * feature_dim + j] - mean;
-                var += diff * diff;
-            }
-            var /= feature_dim;
-            float std = std::sqrt(var + epsilon);
-            
-            for (u32 j = 0; j < feature_dim; j++) {
-                float normalized = (x_data[i * feature_dim + j] - mean) / std;
-                output[i * feature_dim + j] = gamma_data[j] * normalized + beta_data[j];
-            }
-        }
-        
-        return _accelerator.create_tensor(output.data(), shape, dtype, false);
-    }
     
     auto result = _accelerator.create_tensor(shape, dtype);
     
@@ -1099,11 +717,6 @@ std::shared_ptr<Tensor> TensorOperations::pow(std::shared_ptr<Tensor> a, std::sh
 std::shared_ptr<Tensor> TensorOperations::exp(std::shared_ptr<Tensor> tensor) {
     if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for exp");
-        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::exp(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
-    }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("exp", dtype);
     std::string glsl = generate_activation_kernel_source(dtype, "exp(data_in[index])");
@@ -1116,11 +729,6 @@ std::shared_ptr<Tensor> TensorOperations::exp(std::shared_ptr<Tensor> tensor) {
 std::shared_ptr<Tensor> TensorOperations::log(std::shared_ptr<Tensor> tensor) {
     if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for log");
-        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::log(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
-    }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("log", dtype);
     std::string glsl = generate_unary_kernel_source("log(data_in[index])", dtype);
@@ -1133,11 +741,6 @@ std::shared_ptr<Tensor> TensorOperations::log(std::shared_ptr<Tensor> tensor) {
 std::shared_ptr<Tensor> TensorOperations::sin(std::shared_ptr<Tensor> tensor) {
     if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for sin");
-        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::sin(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
-    }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("sin", dtype);
     std::string glsl = generate_unary_kernel_source("sin(data_in[index])", dtype);
@@ -1150,11 +753,6 @@ std::shared_ptr<Tensor> TensorOperations::sin(std::shared_ptr<Tensor> tensor) {
 std::shared_ptr<Tensor> TensorOperations::cos(std::shared_ptr<Tensor> tensor) {
     if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for cos");
-        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::cos(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
-    }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("cos", dtype);
     std::string glsl = generate_unary_kernel_source("cos(data_in[index])", dtype);
@@ -1167,11 +765,6 @@ std::shared_ptr<Tensor> TensorOperations::cos(std::shared_ptr<Tensor> tensor) {
 std::shared_ptr<Tensor> TensorOperations::sqrt(std::shared_ptr<Tensor> tensor) {
     if (!tensor || !tensor->is_valid()) throw std::invalid_argument("Tensor must be valid");
     DataType dtype = tensor->get_dtype();
-    if (!_accelerator.use_gpu()) {
-        _accelerator.notify_cpu_fallback();
-        if (dtype != DataType::F32) throw std::runtime_error("CPU fallback only supports F32 for sqrt");
-        u64 cnt = tensor->get_element_count(); std::vector<float> in(cnt), out(cnt); tensor->download_data(in.data()); for (u64 i=0;i<cnt;++i) out[i]=std::sqrt(in[i]); return _accelerator.create_tensor(out.data(), tensor->get_shape(), dtype, false);
-    }
     auto result = _accelerator.create_tensor(tensor->get_shape(), dtype);
     std::string kernel_name = get_kernel_name_for_dtype("sqrt", dtype);
     std::string glsl = generate_unary_kernel_source("sqrt(data_in[index])", dtype);

@@ -28,7 +28,7 @@ The goal is to combine the usability of **NumPy** with the deep learning power o
  - Operator overloads for shared_ptr<Tensor> (ergonomic arithmetic) are implemented and tested.
  - CPU/GPU mode control and instrumentation (CPU-fallback counter) are available and exercised by unit tests.
  - Vulkan backend writes failing GLSL snippets to /tmp for shader-debug dumps when compilation fails.
- - Vendor allocators (mimalloc) and Vulkan memory allocator (VMA) are integrated as dependencies.
+ - Vulkan Memory Allocator (VMA) is integrated for efficient GPU memory management.
  - Unit tests: full suite passes locally (19/19) on the repo I inspected.
 
 ---
@@ -80,7 +80,7 @@ The goal is to combine the usability of **NumPy** with the deep learning power o
  - [ ] Mixed precision support (FP16, BF16)  
 	 - note: FP16 (F16) has explicit handling in several ops; BF16 support not present.
  - [ ] Memory pool / caching (avoid malloc/free overhead)  
-	 - note: allocator/backends include mimalloc and VMA (vendor libs are integrated), but there is no QuasarML-specific pooled allocator yet.
+	 - note: VMA handles GPU memory; tensor pooling exists for reuse.
  - [ ] Multi-GPU support (basic)  
 
 ---

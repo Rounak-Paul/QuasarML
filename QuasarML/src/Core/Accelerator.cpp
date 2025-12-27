@@ -6,18 +6,11 @@ namespace QuasarML {
 
 Accelerator::Accelerator(const std::string& name, u32 gpu_idx)
     : _backend(std::make_unique<VulkanBackend>(name, gpu_idx))
+    , _gpu_idx(gpu_idx)
 {
-    if (!_backend) {
-        throw std::runtime_error("Failed to create Vulkan backend");
+    if (!_backend || !_backend->is_valid()) {
+        throw std::runtime_error("Failed to create Vulkan backend - GPU compute not available");
     }
-}
-
-bool Accelerator::use_gpu() const {
-    // If user forced CPU, return false. If forced GPU, return true. Otherwise Auto - return true when backend exists and is_valid
-    if (_device_mode == DeviceMode::CPU) return false;
-    if (_device_mode == DeviceMode::GPU) return true;
-    // Auto: check backend existence
-    return _backend != nullptr && is_valid();
 }
 
 Accelerator::~Accelerator() {
@@ -88,24 +81,19 @@ std::vector<std::string> Accelerator::get_kernel_names() const {
 
 std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape,
                                                     DataType dtype,
-                                                    bool device_only) {
+                                                    bool host_visible) {
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");
     }
     
-    if (_tensor_pooling_enabled && device_only && use_gpu()) {
+    if (_tensor_pooling_enabled && !host_visible) {
         auto pooled = get_pooled_tensor(shape, dtype);
         if (pooled) {
             return pooled;
         }
     }
-    
-    bool final_device_only = device_only;
-    if (!use_gpu()) {
-        final_device_only = false;
-    }
 
-    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, final_device_only);
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, host_visible);
     
     {
         std::lock_guard<std::mutex> lock(_tensor_mutex);
@@ -123,7 +111,7 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const std::vector<u32>& shape
 std::shared_ptr<Tensor> Accelerator::create_tensor(const void* data,
                                                     const std::vector<u32>& shape,
                                                     DataType dtype,
-                                                    bool device_only) {
+                                                    bool host_visible) {
     if (!_backend) {
         throw std::runtime_error("Backend not initialized");
     }
@@ -131,11 +119,8 @@ std::shared_ptr<Tensor> Accelerator::create_tensor(const void* data,
     if (!data) {
         throw std::invalid_argument("Data pointer cannot be null");
     }
-    
-    bool final_device_only = device_only;
-    if (!use_gpu()) final_device_only = false;
 
-    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, final_device_only);
+    auto tensor = std::make_shared<Tensor>(this, _backend.get(), shape, dtype, host_visible);
     tensor->upload_data(data);
     
     _tensors.push_back(tensor);
@@ -305,17 +290,6 @@ bool Accelerator::is_valid() const {
     return _backend != nullptr && _backend->is_valid();
 }
 
-void Accelerator::notify_cpu_fallback() {
-    _cpu_fallback_count.fetch_add(1u, std::memory_order_relaxed);
-}
-
-u32 Accelerator::get_cpu_fallback_count() const {
-    return _cpu_fallback_count.load(std::memory_order_relaxed);
-}
-
-void Accelerator::reset_cpu_fallback_count() {
-    _cpu_fallback_count.store(0u, std::memory_order_relaxed);
-}
 void Accelerator::cleanup_dead_tensor_references() {
     auto old_size = _tensors.size();
     

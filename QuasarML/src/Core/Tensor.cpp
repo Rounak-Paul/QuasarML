@@ -7,7 +7,6 @@
 
 namespace QuasarML {
 
-// Helper: check accelerator match
 void Tensor::check_accelerator_match(const std::shared_ptr<Tensor>& other) const {
     if (!other) throw std::invalid_argument("Other tensor is null");
     if (this->_accelerator == nullptr || other->get_accelerator() == nullptr)
@@ -16,17 +15,16 @@ void Tensor::check_accelerator_match(const std::shared_ptr<Tensor>& other) const
         throw std::runtime_error("Tensors from different Accelerators cannot be used together");
 }
 
-
 Tensor::Tensor(Accelerator* accelerator,
                VulkanBackend* backend,
                const std::vector<u32>& shape,
                DataType dtype,
-               bool device_only)
+               bool host_visible)
     : _accelerator(accelerator)
     , _backend(backend)
     , _shape(shape)
     , _dtype(dtype)
-    , _device_only(device_only)
+    , _host_visible(host_visible)
     , _is_valid(false)
 {
     if (!_backend) throw std::invalid_argument("Backend cannot be null");
@@ -40,28 +38,30 @@ Tensor::~Tensor() {
 }
 
 Tensor::Tensor(Tensor&& other) noexcept
-    : _backend(other._backend)
+    : _accelerator(other._accelerator)
+    , _backend(other._backend)
     , _shape(std::move(other._shape))
     , _dtype(other._dtype)
     , _element_count(other._element_count)
-    , _device_only(other._device_only)
+    , _host_visible(other._host_visible)
     , _buffer(std::move(other._buffer))
     , _is_valid(other._is_valid)
 {
+    other._accelerator = nullptr;
     other._backend = nullptr;
     other._element_count = 0;
     other._is_valid = false;
     other._buffer = {};
 }
 
-
-Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only, bool owns_buffer)
+Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, 
+               const std::vector<u32>& shape, DataType dtype, bool host_visible, bool owns_buffer)
     : _accelerator(accelerator)
     , _backend(backend)
     , _buffer(buffer)
     , _shape(shape)
     , _dtype(dtype)
-    , _device_only(device_only)
+    , _host_visible(host_visible)
     , _is_valid(true)
     , _element_offset(0)
     , _owns_buffer(owns_buffer)
@@ -70,20 +70,21 @@ Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::
     calculate_element_count();
 }
 
-Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, const std::vector<u32>& shape, DataType dtype, bool device_only, u64 element_offset, bool owns_buffer)
+Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::Buffer buffer, 
+               const std::vector<u32>& shape, DataType dtype, bool host_visible, 
+               u64 element_offset, bool owns_buffer)
     : _accelerator(accelerator)
     , _backend(backend)
     , _buffer(buffer)
     , _shape(shape)
     , _dtype(dtype)
-    , _device_only(device_only)
+    , _host_visible(host_visible)
     , _is_valid(true)
     , _element_offset(element_offset)
     , _owns_buffer(owns_buffer)
 {
     validate_shape(_shape);
     calculate_element_count();
-    // ensure offset+size doesn't exceed buffer
     u64 needed = _element_offset * get_element_size() + get_size_bytes();
     if (needed > _buffer.size) throw std::invalid_argument("View exceeds buffer bounds");
 }
@@ -91,14 +92,16 @@ Tensor::Tensor(Accelerator* accelerator, VulkanBackend* backend, VulkanBackend::
 Tensor& Tensor::operator=(Tensor&& other) noexcept {
     if (this != &other) {
         cleanup_buffer();
+        _accelerator = other._accelerator;
         _backend = other._backend;
         _shape = std::move(other._shape);
         _dtype = other._dtype;
         _element_count = other._element_count;
-        _device_only = other._device_only;
+        _host_visible = other._host_visible;
         _buffer = std::move(other._buffer);
         _is_valid = other._is_valid;
 
+        other._accelerator = nullptr;
         other._backend = nullptr;
         other._element_count = 0;
         other._is_valid = false;
@@ -222,7 +225,7 @@ std::string Tensor::get_info_string() const {
         << ", dtype=" << dtype_to_string(_dtype)
         << ", elements=" << _element_count
         << ", bytes=" << get_size_bytes()
-        << ", device_only=" << (_device_only ? "true" : "false")
+        << ", host_visible=" << (_host_visible ? "true" : "false")
         << ")";
     return oss.str();
 }
@@ -267,7 +270,7 @@ void Tensor::allocate_buffer() {
     if (buffer_size == 0) throw std::runtime_error("Cannot allocate zero-sized buffer");
     
     try {
-        _buffer = _backend->create_storage_buffer(buffer_size, !_device_only);
+        _buffer = _backend->create_storage_buffer(buffer_size, _host_visible);
         _is_valid = _buffer.is_valid();
         if (!_is_valid) throw std::runtime_error("Failed to create storage buffer");
     } catch (const std::exception& e) {
@@ -284,13 +287,11 @@ void Tensor::validate_data_transfer(u64 size_bytes, u64 offset_bytes) const {
 }
 
 std::shared_ptr<Tensor> Tensor::create_view_with_shape(const std::vector<u32>& new_shape) const {
-    // Views should not take ownership of the underlying buffer
-    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only, /*owns_buffer=*/false);
+    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _host_visible, false);
 }
 
 std::shared_ptr<Tensor> Tensor::create_view_with_shape_and_offset(const std::vector<u32>& new_shape, u64 element_offset) const {
-    // Views should not take ownership of the underlying buffer
-    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _device_only, element_offset + _element_offset, /*owns_buffer=*/false);
+    return std::make_shared<Tensor>(_accelerator, _backend, _buffer, new_shape, _dtype, _host_visible, element_offset + _element_offset, false);
 }
 // Operator overloads
 std::shared_ptr<Tensor> Tensor::operator+(const std::shared_ptr<Tensor>& other) const {

@@ -427,9 +427,6 @@ static bool test_shader_compile_dump() {
     auto& acc = qsml::accelerator();
 
     // Force GPU mode for a deterministic path
-    try {
-        acc.set_device_mode(Accelerator::DeviceMode::GPU);
-    } catch (...) { /* ignore if API differs */ }
 
     // Best-effort: remove old quasar_shader_error_ files so detection is unambiguous
     try {
@@ -531,57 +528,7 @@ static bool test_shader_compile_dump() {
             return ok;
         });
 
-        run("cpu_gpu_mode_switch", []() {
-            std::cout << "[cpu_gpu_mode_switch]\n";
-            auto& acc = qsml::accelerator();
 
-            // ensure GPU-preferred path: reset counter and force GPU
-            acc.reset_cpu_fallback_count();
-            acc.set_device_mode(Accelerator::DeviceMode::GPU);
-
-            // perform an op that could fall back if GPU unsupported
-            std::vector<float> a = {1.0f, 2.0f};
-            std::vector<float> b = {3.0f, 4.0f};
-            auto ta = qsml::from_data(a.data(), {2}, DataType::F32);
-            auto tb = qsml::from_data(b.data(), {2}, DataType::F32);
-            if (!ta || !tb) return false;
-            auto tc = qsml::add(ta, tb);
-            if (!tc) return false;
-
-            // when GPU forced, we expect CPU fallback count to be zero (no unexpected CPU compute)
-            u32 cnt_gpu = acc.get_cpu_fallback_count();
-
-            // Now force CPU and perform same op; counter should increase
-            acc.set_device_mode(Accelerator::DeviceMode::CPU);
-            auto tc2 = qsml::add(ta, tb);
-            if (!tc2) return false;
-            u32 cnt_cpu = acc.get_cpu_fallback_count();
-
-            bool ok = (cnt_gpu == 0u) && (cnt_cpu >= 1u);
-            std::cout << "  cpu/gpu mode fallback counts: gpu=" << cnt_gpu << " cpu=" << cnt_cpu << " => " << (ok?"OK":"FAIL") << "\n";
-            return ok;
-        });
-
-        run("cpu_gpu_broadcast_dtype_check", []() {
-            std::cout << "[cpu_gpu_broadcast_dtype_check]\n";
-            auto& acc = qsml::accelerator();
-
-            acc.reset_cpu_fallback_count();
-            // force CPU and test broadcast on an integer dtype
-            acc.set_device_mode(Accelerator::DeviceMode::CPU);
-            std::vector<int32_t> ai = {1, 2}; // shape [2,1]
-            std::vector<int32_t> bi = {10, 20, 30}; // shape [1,3]
-            auto ta = qsml::from_data(ai.data(), {2,1}, DataType::I32);
-            auto tb = qsml::from_data(bi.data(), {1,3}, DataType::I32);
-            if (!ta || !tb) return false;
-            auto tout = qsml::add(ta, tb);
-            if (!tout) return false;
-            // cpu fallback must have been used
-            u32 cnt = acc.get_cpu_fallback_count();
-            bool ok = (cnt >= 1u);
-            std::cout << "  cpu broadcast fallback count=" << cnt << " => " << (ok?"OK":"FAIL") << "\n";
-            return ok;
-        });
 
         run("scalar_ops", []() {
             std::cout << "[scalar_ops]\n";
@@ -773,13 +720,8 @@ void main() {
             }
         });
 
-        // Ensure GPU mode does not trigger CPU fallbacks for the common ops across dtypes
-        run("gpu_mode_all_dtypes_ops_no_cpu_fallback", []() {
-            std::cout << "[gpu_mode_all_dtypes_ops_no_cpu_fallback]\n";
-            auto& acc = qsml::accelerator();
-
-            acc.reset_cpu_fallback_count();
-            acc.set_device_mode(Accelerator::DeviceMode::GPU);
+        run("gpu_mode_all_dtypes_ops", []() {
+            std::cout << "[gpu_mode_all_dtypes_ops]\n";
 
             bool ok = true;
 
@@ -871,9 +813,8 @@ void main() {
                 }
             }
 
-            u32 cnt = acc.get_cpu_fallback_count();
-            bool final_ok = ok && (cnt == 0u);
-            LOG_INFO("gpu-mode cpu-fallback counter={} => {}", cnt, (final_ok ? "OK" : "FAIL"));
+            bool final_ok = ok;
+            LOG_INFO("gpu-mode dtypes test => {}", (final_ok ? "OK" : "FAIL"));
             return final_ok;
         });
 

@@ -99,8 +99,8 @@ int main() {
         return qsml::current_device() < qsml::device_count();
     });
 
-    test.test("gpu_available returns true", []() {
-        return qsml::gpu_available();
+    test.test("accelerator is valid", []() {
+        return qsml::is_valid();
     });
 
     // ========================================================================

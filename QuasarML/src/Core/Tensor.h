@@ -1,30 +1,27 @@
 
 
-// For shared_ptr<Tensor> operator overloads, include "TensorOps.h" after this header.
 #pragma once
 
 #include <qspch.h>
 #include "DataTypes.h"
 #include <VulkanBackend/VulkanBackend.h>
 #include <memory>
-
 #include <string>
 #include <vector>
-#include <numeric>   // for std::accumulate
-#include <functional> // for std::multiplies
-#include <memory>
-
+#include <numeric>
+#include <functional>
 
 namespace QuasarML {
 
-class Accelerator; // Forward declaration
+class Accelerator;
+
 class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
     Tensor(Accelerator* accelerator,
            VulkanBackend* backend,
            const std::vector<u32>& shape,
            DataType dtype = DataType::F32,
-           bool device_only = false);
+           bool host_visible = false);
 
     ~Tensor();
 
@@ -48,7 +45,7 @@ public:
     DataType get_dtype() const { return _dtype; }
     u32 get_element_size() const { return get_dtype_size(_dtype); }
     u64 get_size_bytes() const { return _element_count * get_element_size(); }
-    bool is_device_only() const { return _device_only; }
+    bool is_host_visible() const { return _host_visible; }
 
     Tensor& reshape(const std::vector<u32>& new_shape);
     std::shared_ptr<Tensor> create_reshaped_view(const std::vector<u32>& new_shape) const;
@@ -68,44 +65,42 @@ public:
 
     VulkanBackend::Buffer& get_buffer() { return _buffer; }
     const VulkanBackend::Buffer& get_buffer() const { return _buffer; }
-    // Element offset (in elements) for views into existing buffer
     u64 get_element_offset() const { return _element_offset; }
 
     Tensor(Accelerator* accelerator,
-        VulkanBackend* backend,
-        VulkanBackend::Buffer buffer,
-        const std::vector<u32>& shape,
-        DataType dtype,
-        bool device_only,
-        bool owns_buffer = true);
+           VulkanBackend* backend,
+           VulkanBackend::Buffer buffer,
+           const std::vector<u32>& shape,
+           DataType dtype,
+           bool host_visible,
+           bool owns_buffer = true);
+           
     Tensor(Accelerator* accelerator,
-        VulkanBackend* backend,
-        VulkanBackend::Buffer buffer,
-        const std::vector<u32>& shape,
-        DataType dtype,
-        bool device_only,
-        u64 element_offset,
-        bool owns_buffer = true);
-    // Operator overloads for ergonomic usage
+           VulkanBackend* backend,
+           VulkanBackend::Buffer buffer,
+           const std::vector<u32>& shape,
+           DataType dtype,
+           bool host_visible,
+           u64 element_offset,
+           bool owns_buffer = true);
+
     std::shared_ptr<Tensor> operator+(const std::shared_ptr<Tensor>& other) const;
     std::shared_ptr<Tensor> operator-(const std::shared_ptr<Tensor>& other) const;
     std::shared_ptr<Tensor> operator*(const std::shared_ptr<Tensor>& other) const;
     std::shared_ptr<Tensor> operator/(const std::shared_ptr<Tensor>& other) const;
 
-    // Scalar overloads (right-hand side)
     std::shared_ptr<Tensor> operator+(float scalar) const;
     std::shared_ptr<Tensor> operator-(float scalar) const;
     std::shared_ptr<Tensor> operator*(float scalar) const;
     std::shared_ptr<Tensor> operator/(float scalar) const;
 
-    // Scalar overloads (left-hand side, friend)
     friend std::shared_ptr<Tensor> operator+(float scalar, const Tensor& tensor);
     friend std::shared_ptr<Tensor> operator-(float scalar, const Tensor& tensor);
     friend std::shared_ptr<Tensor> operator*(float scalar, const Tensor& tensor);
     friend std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor);
+    
     Accelerator* get_accelerator() const { return _accelerator; }
 
-    // View creation helpers (public so TensorOperations can create zero-copy views)
     std::shared_ptr<Tensor> create_view_with_shape(const std::vector<u32>& new_shape) const;
     std::shared_ptr<Tensor> create_view_with_shape_and_offset(const std::vector<u32>& new_shape, u64 element_offset) const;
 
@@ -115,11 +110,11 @@ private:
     std::vector<u32> _shape;
     DataType _dtype;
     u64 _element_count;
-    bool _device_only;
+    bool _host_visible;
     VulkanBackend::Buffer _buffer;
     bool _is_valid;
-    u64 _element_offset = 0; // offset in elements into the buffer (for views)
-    bool _owns_buffer = true; // newly-created views may reference an existing buffer without owning it
+    u64 _element_offset = 0;
+    bool _owns_buffer = true;
 
     void calculate_element_count();
     void check_accelerator_match(const std::shared_ptr<Tensor>& other) const;
@@ -129,16 +124,20 @@ private:
     void cleanup_buffer();
 };
 
-// utility functions
 inline u64 calculate_element_count(const std::vector<u32>& shape) {
     return std::accumulate(shape.begin(), shape.end(), 1ULL, std::multiplies<u64>());
 }
-inline bool shapes_equal(const std::vector<u32>& a, const std::vector<u32>& b) { return a == b; }
+
+inline bool shapes_equal(const std::vector<u32>& a, const std::vector<u32>& b) { 
+    return a == b; 
+}
+
 inline bool is_valid_shape(const std::vector<u32>& shape) {
     if (shape.empty()) return false;
     for (auto d : shape) if (d == 0) return false;
     return true;
 }
+
 std::string shape_to_string(const std::vector<u32>& shape);
 
-} // namespace QuasarML
+}
