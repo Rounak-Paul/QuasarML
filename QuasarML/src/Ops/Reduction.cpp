@@ -1,6 +1,7 @@
 #include "Reduction.h"
 #include "Elementwise.h"
 #include "ShaderGen.h"
+#include "DeviceTuning.h"
 #include <Core/Kernel.h>
 #include <Common/Assert.h>
 #include <sstream>
@@ -9,8 +10,6 @@ namespace QuasarML {
 namespace Ops {
 
 namespace {
-
-constexpr u32 WORKGROUP_SIZE = 256;
 
 std::shared_ptr<Kernel> get_or_create_kernel(Device& device, const std::string& key, const std::string& code, u32 bindings, u32 push_size) {
     auto k = device.get_kernel(key);
@@ -114,11 +113,12 @@ std::string prod_shader(DataType dtype, u32 workgroup_size) {
 
 std::shared_ptr<Tensor> reduce_full(Device& device, std::shared_ptr<Tensor> a, const std::string& op_name,
                                      std::string(*shader_fn)(DataType, u32)) {
+    u32 wg_size = get_device_params(device).reduction_workgroup;
     u64 n = a->numel();
-    u32 num_workgroups = static_cast<u32>((n + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE);
+    u32 num_workgroups = static_cast<u32>((n + wg_size - 1) / wg_size);
     
-    std::string key = op_name + "_" + dtype_to_string(a->dtype());
-    auto kernel = get_or_create_kernel(device, key, shader_fn(a->dtype(), WORKGROUP_SIZE), 2, sizeof(u32));
+    std::string key = op_name + "_" + dtype_to_string(a->dtype()) + "_wg" + std::to_string(wg_size);
+    auto kernel = get_or_create_kernel(device, key, shader_fn(a->dtype(), wg_size), 2, sizeof(u32));
     
     auto temp = device.create_tensor({num_workgroups}, a->dtype());
     temp->zero();
@@ -131,7 +131,7 @@ std::shared_ptr<Tensor> reduce_full(Device& device, std::shared_ptr<Tensor> a, c
     device.synchronize();
     
     while (num_workgroups > 1) {
-        u32 next_workgroups = (num_workgroups + WORKGROUP_SIZE - 1) / WORKGROUP_SIZE;
+        u32 next_workgroups = (num_workgroups + wg_size - 1) / wg_size;
         auto next = device.create_tensor({next_workgroups}, a->dtype());
         next->zero();
         
@@ -175,10 +175,11 @@ std::shared_ptr<Tensor> sum(Device& device, std::shared_ptr<Tensor> a, i32 axis,
     for (i32 i = 0; i < axis; ++i) outer *= a->dim(i);
     for (u32 i = axis + 1; i < a->rank(); ++i) inner *= a->dim(i);
     
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
     std::ostringstream ss;
     const char* type = dtype_to_glsl(a->dtype());
     ss << "#version 450\n";
-    ss << "layout(local_size_x = 256) in;\n";
+    ss << "layout(local_size_x = " << wg_size << ") in;\n";
     ss << ShaderGen::buffer_binding(0, "in_data", a->dtype(), true);
     ss << ShaderGen::buffer_binding(1, "out_data", a->dtype(), false);
     ss << "layout(push_constant) uniform PushConstants { uint outer; uint axis_size; uint inner; };\n\n";
@@ -192,7 +193,7 @@ std::shared_ptr<Tensor> sum(Device& device, std::shared_ptr<Tensor> a, i32 axis,
     ss << "    out_data[idx] = acc;\n";
     ss << ShaderGen::main_end();
     
-    std::string key = "sum_axis_" + std::string(dtype_to_string(a->dtype()));
+    std::string key = "sum_axis_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
     struct { u32 outer; u32 axis_size; u32 inner; } pc = {
         static_cast<u32>(outer), static_cast<u32>(axis_size), static_cast<u32>(inner)
     };

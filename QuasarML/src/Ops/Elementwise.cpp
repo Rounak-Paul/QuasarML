@@ -1,5 +1,6 @@
 #include "Elementwise.h"
 #include "ShaderGen.h"
+#include "DeviceTuning.h"
 #include <Core/Kernel.h>
 #include <Common/Assert.h>
 #include <sstream>
@@ -10,20 +11,22 @@ namespace Ops {
 namespace {
 
 std::shared_ptr<Kernel> get_or_create_binary_kernel(Device& device, const char* name, const char* op, DataType dtype) {
-    std::string key = std::string(name) + "_" + dtype_to_string(dtype);
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = std::string(name) + "_" + dtype_to_string(dtype) + "_wg" + std::to_string(wg_size);
     auto k = device.get_kernel(key);
     if (k) return k;
     
-    std::string code = ShaderGen::elementwise_binary(op, dtype);
+    std::string code = ShaderGen::elementwise_binary(op, dtype, wg_size);
     return device.create_kernel(key, code, 3, sizeof(u32));
 }
 
 std::shared_ptr<Kernel> get_or_create_unary_kernel(Device& device, const char* name, const char* op, DataType dtype) {
-    std::string key = std::string(name) + "_" + dtype_to_string(dtype);
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = std::string(name) + "_" + dtype_to_string(dtype) + "_wg" + std::to_string(wg_size);
     auto k = device.get_kernel(key);
     if (k) return k;
     
-    std::string code = ShaderGen::elementwise_unary(op, dtype);
+    std::string code = ShaderGen::elementwise_unary(op, dtype, wg_size);
     return device.create_kernel(key, code, 2, sizeof(u32));
 }
 
@@ -33,9 +36,9 @@ std::shared_ptr<Kernel> get_or_create_custom_kernel(Device& device, const std::s
     return device.create_kernel(key, code, bindings, push_size);
 }
 
-std::string scalar_binary_shader(const char* op, DataType dtype) {
+std::string scalar_binary_shader(const char* op, DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
-    ss << ShaderGen::glsl_header();
+    ss << ShaderGen::glsl_header(workgroup_size);
     ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
     ss << ShaderGen::buffer_binding(1, "result", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; " << dtype_to_glsl(dtype) << " scalar; };\n\n";
@@ -47,10 +50,10 @@ std::string scalar_binary_shader(const char* op, DataType dtype) {
     return ss.str();
 }
 
-std::string relu_shader(DataType dtype) {
+std::string relu_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
-    ss << ShaderGen::glsl_header();
+    ss << ShaderGen::glsl_header(workgroup_size);
     ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
     ss << ShaderGen::buffer_binding(1, "result", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
@@ -62,10 +65,10 @@ std::string relu_shader(DataType dtype) {
     return ss.str();
 }
 
-std::string sigmoid_shader(DataType dtype) {
+std::string sigmoid_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
-    ss << ShaderGen::glsl_header();
+    ss << ShaderGen::glsl_header(workgroup_size);
     ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
     ss << ShaderGen::buffer_binding(1, "result", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
@@ -77,10 +80,10 @@ std::string sigmoid_shader(DataType dtype) {
     return ss.str();
 }
 
-std::string gelu_shader(DataType dtype) {
+std::string gelu_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
-    ss << ShaderGen::glsl_header();
+    ss << ShaderGen::glsl_header(workgroup_size);
     ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
     ss << ShaderGen::buffer_binding(1, "result", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
@@ -93,34 +96,40 @@ std::string gelu_shader(DataType dtype) {
     return ss.str();
 }
 
-std::string softmax_shader(DataType dtype) {
+std::string softmax_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
     ss << "#version 450\n";
-    ss << "layout(local_size_x = 256) in;\n\n";
+    ss << "layout(local_size_x = " << workgroup_size << ") in;\n\n";
     ss << ShaderGen::buffer_binding(0, "in_data", dtype, true);
     ss << ShaderGen::buffer_binding(1, "out_data", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint batch_size; uint axis_size; };\n\n";
-    ss << "shared " << type << " shared_data[256];\n\n";
+    ss << "shared " << type << " shared_data[" << workgroup_size << "];\n\n";
     ss << ShaderGen::main_begin();
     ss << "    uint batch_idx = gl_WorkGroupID.x;\n";
     ss << "    uint tid = gl_LocalInvocationID.x;\n";
     ss << "    uint offset = batch_idx * axis_size;\n";
     ss << "    " << type << " local_max = " << type << "(-3.402823466e+38);\n";
-    ss << "    for (uint i = tid; i < axis_size; i += 256) local_max = max(local_max, in_data[offset + i]);\n";
+    ss << "    for (uint i = tid; i < axis_size; i += " << workgroup_size << ") local_max = max(local_max, in_data[offset + i]);\n";
     ss << "    shared_data[tid] = local_max;\n";
     ss << "    barrier();\n";
-    ss << "    for (uint s = 128; s > 0; s >>= 1) { if (tid < s) shared_data[tid] = max(shared_data[tid], shared_data[tid + s]); barrier(); }\n";
+    for (u32 s = workgroup_size / 2; s > 0; s >>= 1) {
+        ss << "    if (tid < " << s << ") shared_data[tid] = max(shared_data[tid], shared_data[tid + " << s << "]);\n";
+        ss << "    barrier();\n";
+    }
     ss << "    " << type << " max_val = shared_data[0];\n";
     ss << "    barrier();\n";
     ss << "    " << type << " local_sum = " << type << "(0);\n";
-    ss << "    for (uint i = tid; i < axis_size; i += 256) local_sum += exp(in_data[offset + i] - max_val);\n";
+    ss << "    for (uint i = tid; i < axis_size; i += " << workgroup_size << ") local_sum += exp(in_data[offset + i] - max_val);\n";
     ss << "    shared_data[tid] = local_sum;\n";
     ss << "    barrier();\n";
-    ss << "    for (uint s = 128; s > 0; s >>= 1) { if (tid < s) shared_data[tid] += shared_data[tid + s]; barrier(); }\n";
+    for (u32 s = workgroup_size / 2; s > 0; s >>= 1) {
+        ss << "    if (tid < " << s << ") shared_data[tid] += shared_data[tid + " << s << "];\n";
+        ss << "    barrier();\n";
+    }
     ss << "    " << type << " sum_val = shared_data[0];\n";
     ss << "    barrier();\n";
-    ss << "    for (uint i = tid; i < axis_size; i += 256) out_data[offset + i] = exp(in_data[offset + i] - max_val) / sum_val;\n";
+    ss << "    for (uint i = tid; i < axis_size; i += " << workgroup_size << ") out_data[offset + i] = exp(in_data[offset + i] - max_val) / sum_val;\n";
     ss << ShaderGen::main_end();
     return ss.str();
 }
@@ -202,9 +211,10 @@ std::shared_ptr<Tensor> divide(Device& device, std::shared_ptr<Tensor> a, std::s
 std::shared_ptr<Tensor> add_scalar(Device& device, std::shared_ptr<Tensor> a, f32 scalar) {
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "add_scalar_" + std::string(dtype_to_string(a->dtype()));
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = "add_scalar_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
     struct { u32 n; f32 scalar; } pc;
-    auto kernel = get_or_create_custom_kernel(device, key, scalar_binary_shader("+", a->dtype()), 2, sizeof(pc));
+    auto kernel = get_or_create_custom_kernel(device, key, scalar_binary_shader("+", a->dtype(), wg_size), 2, sizeof(pc));
     
     pc.n = static_cast<u32>(a->numel());
     pc.scalar = scalar;
@@ -220,9 +230,10 @@ std::shared_ptr<Tensor> add_scalar(Device& device, std::shared_ptr<Tensor> a, f3
 std::shared_ptr<Tensor> multiply_scalar(Device& device, std::shared_ptr<Tensor> a, f32 scalar) {
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "mul_scalar_" + std::string(dtype_to_string(a->dtype()));
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = "mul_scalar_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
     struct { u32 n; f32 scalar; } pc;
-    auto kernel = get_or_create_custom_kernel(device, key, scalar_binary_shader("*", a->dtype()), 2, sizeof(pc));
+    auto kernel = get_or_create_custom_kernel(device, key, scalar_binary_shader("*", a->dtype(), wg_size), 2, sizeof(pc));
     
     pc.n = static_cast<u32>(a->numel());
     pc.scalar = scalar;
@@ -350,8 +361,9 @@ std::shared_ptr<Tensor> tanh(Device& device, std::shared_ptr<Tensor> a) {
 std::shared_ptr<Tensor> relu(Device& device, std::shared_ptr<Tensor> a) {
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "relu_" + std::string(dtype_to_string(a->dtype()));
-    auto kernel = get_or_create_custom_kernel(device, key, relu_shader(a->dtype()), 2, sizeof(u32));
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = "relu_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
+    auto kernel = get_or_create_custom_kernel(device, key, relu_shader(a->dtype(), wg_size), 2, sizeof(u32));
     
     u32 n = static_cast<u32>(a->numel());
     kernel->bind(0, a);
@@ -366,8 +378,9 @@ std::shared_ptr<Tensor> relu(Device& device, std::shared_ptr<Tensor> a) {
 std::shared_ptr<Tensor> sigmoid(Device& device, std::shared_ptr<Tensor> a) {
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "sigmoid_" + std::string(dtype_to_string(a->dtype()));
-    auto kernel = get_or_create_custom_kernel(device, key, sigmoid_shader(a->dtype()), 2, sizeof(u32));
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = "sigmoid_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
+    auto kernel = get_or_create_custom_kernel(device, key, sigmoid_shader(a->dtype(), wg_size), 2, sizeof(u32));
     
     u32 n = static_cast<u32>(a->numel());
     kernel->bind(0, a);
@@ -382,8 +395,9 @@ std::shared_ptr<Tensor> sigmoid(Device& device, std::shared_ptr<Tensor> a) {
 std::shared_ptr<Tensor> gelu(Device& device, std::shared_ptr<Tensor> a) {
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "gelu_" + std::string(dtype_to_string(a->dtype()));
-    auto kernel = get_or_create_custom_kernel(device, key, gelu_shader(a->dtype()), 2, sizeof(u32));
+    u32 wg_size = get_device_params(device).elementwise_workgroup;
+    std::string key = "gelu_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
+    auto kernel = get_or_create_custom_kernel(device, key, gelu_shader(a->dtype(), wg_size), 2, sizeof(u32));
     
     u32 n = static_cast<u32>(a->numel());
     kernel->bind(0, a);
@@ -401,9 +415,10 @@ std::shared_ptr<Tensor> softmax(Device& device, std::shared_ptr<Tensor> a, i32 a
     
     auto result = device.create_tensor(a->shape(), a->dtype());
     
-    std::string key = "softmax_" + std::string(dtype_to_string(a->dtype()));
+    u32 wg_size = get_device_params(device).softmax_workgroup;
+    std::string key = "softmax_" + std::string(dtype_to_string(a->dtype())) + "_wg" + std::to_string(wg_size);
     struct { u32 batch_size; u32 axis_size; } pc;
-    auto kernel = get_or_create_custom_kernel(device, key, softmax_shader(a->dtype()), 2, sizeof(pc));
+    auto kernel = get_or_create_custom_kernel(device, key, softmax_shader(a->dtype(), wg_size), 2, sizeof(pc));
     
     u64 axis_size = a->dim(axis);
     u64 batch_size = a->numel() / axis_size;

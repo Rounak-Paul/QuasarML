@@ -37,9 +37,9 @@ std::string bounds_check(const char* size_var) {
     return ss.str();
 }
 
-std::string elementwise_binary(const char* op, DataType dtype) {
+std::string elementwise_binary(const char* op, DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
-    ss << glsl_header();
+    ss << glsl_header(workgroup_size);
     ss << buffer_binding(0, "a", dtype, true);
     ss << buffer_binding(1, "b", dtype, true);
     ss << buffer_binding(2, "result", dtype, false);
@@ -52,9 +52,9 @@ std::string elementwise_binary(const char* op, DataType dtype) {
     return ss.str();
 }
 
-std::string elementwise_unary(const char* op, DataType dtype) {
+std::string elementwise_unary(const char* op, DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
-    ss << glsl_header();
+    ss << glsl_header(workgroup_size);
     ss << buffer_binding(0, "in_data", dtype, true);
     ss << buffer_binding(1, "result", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
@@ -66,9 +66,9 @@ std::string elementwise_unary(const char* op, DataType dtype) {
     return ss.str();
 }
 
-std::string fill_shader(DataType dtype) {
+std::string fill_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
-    ss << glsl_header();
+    ss << glsl_header(workgroup_size);
     ss << buffer_binding(0, "data", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; " << dtype_to_glsl(dtype) << " value; };\n\n";
     ss << main_begin();
@@ -79,9 +79,9 @@ std::string fill_shader(DataType dtype) {
     return ss.str();
 }
 
-std::string copy_shader(DataType dtype) {
+std::string copy_shader(DataType dtype, u32 workgroup_size) {
     std::ostringstream ss;
-    ss << glsl_header();
+    ss << glsl_header(workgroup_size);
     ss << buffer_binding(0, "src", dtype, true);
     ss << buffer_binding(1, "dst", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint n; };\n\n";
@@ -89,6 +89,22 @@ std::string copy_shader(DataType dtype) {
     ss << global_index();
     ss << bounds_check("n");
     ss << "    dst[idx] = src[idx];\n";
+    ss << main_end();
+    return ss.str();
+}
+
+std::string transpose_shader(DataType dtype, u32 workgroup_size) {
+    std::ostringstream ss;
+    ss << glsl_header(workgroup_size);
+    ss << buffer_binding(0, "in_data", dtype, true);
+    ss << buffer_binding(1, "out_data", dtype, false);
+    ss << "layout(push_constant) uniform PushConstants { uint rows; uint cols; };\n\n";
+    ss << main_begin();
+    ss << global_index();
+    ss << "    if (idx >= rows * cols) return;\n";
+    ss << "    uint row = idx / cols;\n";
+    ss << "    uint col = idx % cols;\n";
+    ss << "    out_data[col * rows + row] = in_data[idx];\n";
     ss << main_end();
     return ss.str();
 }
