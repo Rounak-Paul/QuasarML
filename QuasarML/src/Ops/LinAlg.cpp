@@ -22,23 +22,11 @@ struct MatmulParams {
 
 MatmulParams compute_optimal_matmul_params(const DeviceCapabilities& caps) {
     MatmulParams params;
-    params.tile_size = caps.optimal_workgroup_size_2d;
+    params.tile_size = 16;
+    params.block_size = 4;
+    params.use_register_blocking = true;
     params.use_subgroup = caps.prefer_subgroup_reduce && caps.subgroup.arithmetic;
     params.subgroup_size = caps.subgroup.size;
-    
-    u32 shared_mem = caps.max_shared_memory;
-    
-    if (caps.max_workgroup_invocations >= 1024 && shared_mem >= 32768) {
-        params.block_size = 4;
-        params.use_register_blocking = true;
-    } else if (caps.max_workgroup_invocations >= 256 && shared_mem >= 16384) {
-        params.block_size = 2;
-        params.use_register_blocking = true;
-    } else {
-        params.block_size = 1;
-        params.use_register_blocking = false;
-    }
-    
     params.effective_tile = params.tile_size * params.block_size;
     return params;
 }
@@ -96,51 +84,56 @@ std::string matmul_shader_simple(DataType dtype, u32 tile_size) {
 std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size) {
     std::ostringstream ss;
     const char* type = dtype_to_glsl(dtype);
+    u32 effective_tile = tile_size * block_size;
+    
     ss << "#version 450\n";
     ss << "#define TS " << tile_size << "\n";
     ss << "#define BS " << block_size << "\n";
-    ss << "layout(local_size_x = TS, local_size_y = TS, local_size_z = 1) in;\n\n";
+    ss << "#define EFF " << effective_tile << "\n";
+    ss << "layout(local_size_x = TS, local_size_y = TS) in;\n\n";
     ss << ShaderGen::buffer_binding(0, "A", dtype, true);
     ss << ShaderGen::buffer_binding(1, "B", dtype, true);
     ss << ShaderGen::buffer_binding(2, "C", dtype, false);
     ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
-    ss << "shared " << type << " tile_a[2][TS][TS + 1];\n";
-    ss << "shared " << type << " tile_b[2][TS][TS + 1];\n\n";
+    ss << "shared " << type << " tile_a[BS][TS][TS + 1];\n";
+    ss << "shared " << type << " tile_b[BS][TS][TS + 1];\n\n";
     ss << "void main() {\n";
-    ss << "    uint local_row = gl_LocalInvocationID.x;\n";
-    ss << "    uint local_col = gl_LocalInvocationID.y;\n";
-    ss << "    uint base_row = gl_WorkGroupID.x * (TS * BS);\n";
-    ss << "    uint base_col = gl_WorkGroupID.y * (TS * BS);\n";
+    ss << "    uint lr = gl_LocalInvocationID.x;\n";
+    ss << "    uint lc = gl_LocalInvocationID.y;\n";
+    ss << "    uint base_row = gl_WorkGroupID.x * EFF;\n";
+    ss << "    uint base_col = gl_WorkGroupID.y * EFF;\n";
     ss << "    " << type << " acc[BS][BS];\n";
-    ss << "    for (uint i = 0; i < BS; ++i) for (uint j = 0; j < BS; ++j) acc[i][j] = " << type << "(0);\n";
+    ss << "    for (uint i = 0; i < BS; ++i)\n";
+    ss << "        for (uint j = 0; j < BS; ++j)\n";
+    ss << "            acc[i][j] = " << type << "(0);\n";
     ss << "    uint num_tiles = (K + TS - 1) / TS;\n";
     ss << "    for (uint t = 0; t < num_tiles; ++t) {\n";
     ss << "        uint tile_k = t * TS;\n";
     ss << "        for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "            uint row = base_row + bi * TS + local_row;\n";
-    ss << "            uint col_k = tile_k + local_col;\n";
-    ss << "            tile_a[bi % 2][local_row][local_col] = (row < M && col_k < K) ? A[row * K + col_k] : " << type << "(0);\n";
+    ss << "            uint row = base_row + bi * TS + lr;\n";
+    ss << "            uint col_k = tile_k + lc;\n";
+    ss << "            tile_a[bi][lr][lc] = (row < M && col_k < K) ? A[row * K + col_k] : " << type << "(0);\n";
     ss << "        }\n";
     ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "            uint row_k = tile_k + local_row;\n";
-    ss << "            uint col = base_col + bj * TS + local_col;\n";
-    ss << "            tile_b[bj % 2][local_row][local_col] = (row_k < K && col < N) ? B[row_k * N + col] : " << type << "(0);\n";
+    ss << "            uint row_k = tile_k + lr;\n";
+    ss << "            uint col = base_col + bj * TS + lc;\n";
+    ss << "            tile_b[bj][lr][lc] = (row_k < K && col < N) ? B[row_k * N + col] : " << type << "(0);\n";
     ss << "        }\n";
     ss << "        barrier();\n";
     ss << "        for (uint k = 0; k < TS; k += 4) {\n";
     ss << "            " << type << " a_reg[BS][4];\n";
     ss << "            " << type << " b_reg[BS][4];\n";
     ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "                a_reg[bi][0] = tile_a[bi % 2][local_row][k];\n";
-    ss << "                a_reg[bi][1] = tile_a[bi % 2][local_row][k + 1];\n";
-    ss << "                a_reg[bi][2] = tile_a[bi % 2][local_row][k + 2];\n";
-    ss << "                a_reg[bi][3] = tile_a[bi % 2][local_row][k + 3];\n";
+    ss << "                a_reg[bi][0] = tile_a[bi][lr][k];\n";
+    ss << "                a_reg[bi][1] = tile_a[bi][lr][k + 1];\n";
+    ss << "                a_reg[bi][2] = tile_a[bi][lr][k + 2];\n";
+    ss << "                a_reg[bi][3] = tile_a[bi][lr][k + 3];\n";
     ss << "            }\n";
     ss << "            for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "                b_reg[bj][0] = tile_b[bj % 2][k][local_col];\n";
-    ss << "                b_reg[bj][1] = tile_b[bj % 2][k + 1][local_col];\n";
-    ss << "                b_reg[bj][2] = tile_b[bj % 2][k + 2][local_col];\n";
-    ss << "                b_reg[bj][3] = tile_b[bj % 2][k + 3][local_col];\n";
+    ss << "                b_reg[bj][0] = tile_b[bj][k][lc];\n";
+    ss << "                b_reg[bj][1] = tile_b[bj][k + 1][lc];\n";
+    ss << "                b_reg[bj][2] = tile_b[bj][k + 2][lc];\n";
+    ss << "                b_reg[bj][3] = tile_b[bj][k + 3][lc];\n";
     ss << "            }\n";
     ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
     ss << "                for (uint bj = 0; bj < BS; ++bj) {\n";
@@ -155,102 +148,9 @@ std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size)
     ss << "    }\n";
     ss << "    for (uint bi = 0; bi < BS; ++bi) {\n";
     ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "            uint out_row = base_row + bi * TS + local_row;\n";
-    ss << "            uint out_col = base_col + bj * TS + local_col;\n";
-    ss << "            if (out_row < M && out_col < N) C[out_row * N + out_col] = acc[bi][bj];\n";
-    ss << "        }\n";
-    ss << "    }\n";
-    ss << "}\n";
-    return ss.str();
-}
-
-std::string matmul_shader_vectorized(DataType dtype, u32 tile_size, u32 block_size, u32 vec_width) {
-    std::ostringstream ss;
-    const char* type = dtype_to_glsl(dtype);
-    const char* vec_type = (dtype == DataType::F32) ? "vec4" : "dvec4";
-    u32 actual_vec = qs_min(vec_width, 4u);
-    
-    ss << "#version 450\n";
-    ss << "#extension GL_EXT_scalar_block_layout : enable\n";
-    ss << "#define TS " << tile_size << "\n";
-    ss << "#define BS " << block_size << "\n";
-    ss << "#define VW " << actual_vec << "\n";
-    ss << "layout(local_size_x = TS, local_size_y = TS) in;\n\n";
-    
-    if (actual_vec == 4 && dtype == DataType::F32) {
-        ss << "layout(set = 0, binding = 0, scalar) readonly buffer BufA { vec4 A[]; };\n";
-        ss << "layout(set = 0, binding = 1, scalar) readonly buffer BufB { vec4 B[]; };\n";
-    } else {
-        ss << ShaderGen::buffer_binding(0, "A", dtype, true);
-        ss << ShaderGen::buffer_binding(1, "B", dtype, true);
-    }
-    ss << ShaderGen::buffer_binding(2, "C", dtype, false);
-    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
-    
-    ss << "shared " << type << " tile_a[TS * BS][TS + 1];\n";
-    ss << "shared " << type << " tile_b[TS][TS * BS + 1];\n\n";
-    
-    ss << "void main() {\n";
-    ss << "    uint lr = gl_LocalInvocationID.x;\n";
-    ss << "    uint lc = gl_LocalInvocationID.y;\n";
-    ss << "    uint base_row = gl_WorkGroupID.x * (TS * BS);\n";
-    ss << "    uint base_col = gl_WorkGroupID.y * (TS * BS);\n\n";
-    
-    ss << "    " << type << " acc[BS][BS];\n";
-    ss << "    for (uint i = 0; i < BS; ++i)\n";
-    ss << "        for (uint j = 0; j < BS; ++j)\n";
-    ss << "            acc[i][j] = " << type << "(0);\n\n";
-    
-    ss << "    uint num_tiles = (K + TS - 1) / TS;\n";
-    ss << "    for (uint t = 0; t < num_tiles; ++t) {\n";
-    ss << "        uint tile_k = t * TS;\n";
-    
-    ss << "        for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "            uint row = base_row + bi * TS + lr;\n";
-    ss << "            uint col_k = tile_k + lc;\n";
-    if (actual_vec == 4 && dtype == DataType::F32) {
-        ss << "            if (row < M && col_k < K) {\n";
-        ss << "                tile_a[bi * TS + lr][lc] = A[row * (K/4) + col_k/4][col_k % 4];\n";
-        ss << "            } else {\n";
-        ss << "                tile_a[bi * TS + lr][lc] = 0.0;\n";
-        ss << "            }\n";
-    } else {
-        ss << "            tile_a[bi * TS + lr][lc] = (row < M && col_k < K) ? A[row * K + col_k] : " << type << "(0);\n";
-    }
-    ss << "        }\n";
-    
-    ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "            uint row_k = tile_k + lr;\n";
-    ss << "            uint col = base_col + bj * TS + lc;\n";
-    if (actual_vec == 4 && dtype == DataType::F32) {
-        ss << "            if (row_k < K && col < N) {\n";
-        ss << "                tile_b[lr][bj * TS + lc] = B[row_k * (N/4) + col/4][col % 4];\n";
-        ss << "            } else {\n";
-        ss << "                tile_b[lr][bj * TS + lc] = 0.0;\n";
-        ss << "            }\n";
-    } else {
-        ss << "            tile_b[lr][bj * TS + lc] = (row_k < K && col < N) ? B[row_k * N + col] : " << type << "(0);\n";
-    }
-    ss << "        }\n";
-    ss << "        barrier();\n\n";
-    
-    ss << "        for (uint k = 0; k < TS; ++k) {\n";
-    ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "                " << type << " a_val = tile_a[bi * TS + lr][k];\n";
-    ss << "                for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "                    acc[bi][bj] = fma(a_val, tile_b[k][bj * TS + lc], acc[bi][bj]);\n";
-    ss << "                }\n";
-    ss << "            }\n";
-    ss << "        }\n";
-    ss << "        barrier();\n";
-    ss << "    }\n\n";
-    
-    ss << "    for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
     ss << "            uint out_row = base_row + bi * TS + lr;\n";
     ss << "            uint out_col = base_col + bj * TS + lc;\n";
-    ss << "            if (out_row < M && out_col < N)\n";
-    ss << "                C[out_row * N + out_col] = acc[bi][bj];\n";
+    ss << "            if (out_row < M && out_col < N) C[out_row * N + out_col] = acc[bi][bj];\n";
     ss << "        }\n";
     ss << "    }\n";
     ss << "}\n";
@@ -327,21 +227,13 @@ std::shared_ptr<Tensor> matmul(Device& device, std::shared_ptr<Tensor> a, std::s
     auto result = device.create_tensor({M, N}, a->dtype());
     
     const auto& params = get_matmul_params(device);
-    const auto& caps = device.capabilities();
-    
-    bool use_vectorized = (M >= 256 && N >= 256 && K >= 64) && 
-                          (caps.preferred_vector_width >= 4) &&
-                          (a->dtype() == DataType::F32);
     
     std::string key = "matmul_" + std::string(dtype_to_string(a->dtype())) + 
                       "_t" + std::to_string(params.tile_size) + 
-                      "_b" + std::to_string(params.block_size) +
-                      (use_vectorized ? "_vec" : "");
+                      "_b" + std::to_string(params.block_size);
     
     std::string shader_code;
-    if (use_vectorized && params.use_register_blocking) {
-        shader_code = matmul_shader_vectorized(a->dtype(), params.tile_size, params.block_size, caps.preferred_vector_width);
-    } else if (params.use_register_blocking) {
+    if (params.use_register_blocking) {
         shader_code = matmul_shader_blocked(a->dtype(), params.tile_size, params.block_size);
     } else {
         shader_code = matmul_shader_simple(a->dtype(), params.tile_size);
