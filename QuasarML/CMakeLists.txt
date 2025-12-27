@@ -30,13 +30,20 @@ set(TINYGLTF_INSTALL OFF CACHE INTERNAL "" FORCE)
 add_subdirectory(vendor/VMA)
 add_subdirectory(vendor/JSON)
 
-target_precompile_headers(QuasarML PUBLIC src/qspch.h)
-target_precompile_headers(QuasarML PUBLIC src/defines.h)
-# set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fsanitize=address -fsanitize=undefined -g")
+find_package(spdlog QUIET)
+if(NOT spdlog_FOUND)
+    include(FetchContent)
+    FetchContent_Declare(
+        spdlog
+        GIT_REPOSITORY https://github.com/gabime/spdlog.git
+        GIT_TAG v1.12.0
+    )
+    FetchContent_MakeAvailable(spdlog)
+endif()
 
 # Include directories
 target_include_directories(QuasarML PUBLIC 
-    src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${Vulkan_INCLUDE_DIRS}
     SYSTEM ${CMAKE_SOURCE_DIR}/QuasarML/vendor/VMA/include
     SYSTEM ${CMAKE_SOURCE_DIR}/QuasarML/vendor/JSON/single_include
@@ -45,6 +52,7 @@ target_include_directories(QuasarML PUBLIC
 target_link_libraries(QuasarML PUBLIC 
     VulkanMemoryAllocator
     nlohmann_json::nlohmann_json
+    spdlog::spdlog
     ${Vulkan_LIBRARIES}
 )
 

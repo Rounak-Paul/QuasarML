@@ -1,193 +1,85 @@
 #include "Kernel.h"
-#include <stdexcept>
+#include "Device.h"
+#include "Tensor.h"
+#include <Common/Assert.h>
 
 namespace QuasarML {
 
-Kernel::Kernel(VulkanBackend* backend,
-               const std::string& name,
-               const std::string& glsl_source,
-               u32 expected_tensor_count,
-               u32 push_constant_size)
-    : _backend(backend)
-    , _name(name)
-    , _glsl_source(glsl_source)
-    , _expected_tensor_count(expected_tensor_count)
-    , _push_constant_size(push_constant_size)
-    , _is_valid(false)
-{
-    if (!_backend) throw std::invalid_argument("Backend cannot be null");
-    if (_name.empty()) throw std::invalid_argument("Kernel name cannot be empty");
-    if (_glsl_source.empty()) throw std::invalid_argument("GLSL source cannot be empty");
-    if (_expected_tensor_count == 0) throw std::invalid_argument("Expected tensor count must be > 0");
-
-    _bound_tensors.resize(_expected_tensor_count);
-    initialize_pipeline();
+Kernel::Kernel(Device* device, const std::string& name, const std::string& glsl_source, u32 num_bindings, u32 push_constant_size)
+    : _device(device), _name(name), _glsl(glsl_source), _num_bindings(num_bindings), _push_size(push_constant_size) {
+    _bindings.resize(num_bindings);
+    _pipeline = _device->backend()->create_compute_pipeline(glsl_source, num_bindings, push_constant_size);
+    _valid = _pipeline.valid();
 }
 
 Kernel::~Kernel() {
-    cleanup_pipeline();
+    if (_valid && _device) {
+        _device->backend()->destroy_pipeline(_pipeline);
+    }
 }
 
 Kernel::Kernel(Kernel&& other) noexcept
-    : _backend(other._backend)
-    , _name(std::move(other._name))
-    , _glsl_source(std::move(other._glsl_source))
-    , _expected_tensor_count(other._expected_tensor_count)
-    , _push_constant_size(other._push_constant_size)
-    , _pipeline(std::move(other._pipeline))
-    , _bound_tensors(std::move(other._bound_tensors))
-    , _is_valid(other._is_valid)
-{
-    other._backend = nullptr;
-    other._expected_tensor_count = 0;
-    other._push_constant_size = 0;
-    other._is_valid = false;
+    : _device(other._device), _name(std::move(other._name)), _glsl(std::move(other._glsl)),
+      _num_bindings(other._num_bindings), _push_size(other._push_size),
+      _pipeline(other._pipeline), _bindings(std::move(other._bindings)), _valid(other._valid) {
     other._pipeline = {};
+    other._valid = false;
 }
 
 Kernel& Kernel::operator=(Kernel&& other) noexcept {
     if (this != &other) {
-        cleanup_pipeline();
-        _backend = other._backend;
+        if (_valid && _device) {
+            _device->backend()->destroy_pipeline(_pipeline);
+        }
+        _device = other._device;
         _name = std::move(other._name);
-        _glsl_source = std::move(other._glsl_source);
-        _expected_tensor_count = other._expected_tensor_count;
-        _push_constant_size = other._push_constant_size;
-        _pipeline = std::move(other._pipeline);
-        _bound_tensors = std::move(other._bound_tensors);
-        _is_valid = other._is_valid;
-
-        other._backend = nullptr;
-        other._expected_tensor_count = 0;
-        other._push_constant_size = 0;
-        other._is_valid = false;
+        _glsl = std::move(other._glsl);
+        _num_bindings = other._num_bindings;
+        _push_size = other._push_size;
+        _pipeline = other._pipeline;
+        _bindings = std::move(other._bindings);
+        _valid = other._valid;
         other._pipeline = {};
+        other._valid = false;
     }
     return *this;
 }
 
-void Kernel::bind_tensor(u32 binding, std::shared_ptr<Tensor> tensor) {
-    if (binding >= _expected_tensor_count) {
-        throw std::out_of_range("Binding index " + std::to_string(binding) + " exceeds expected tensor count");
-    }
-    if (!tensor) throw std::invalid_argument("Tensor cannot be null");
-    if (!tensor->is_valid()) throw std::invalid_argument("Tensor is not valid");
-
-    // store weak ptr; actual descriptor binding will be provided at dispatch time via backend API
-    _bound_tensors[binding] = tensor;
-}
-
-std::weak_ptr<Tensor> Kernel::get_bound_tensor(u32 binding) const {
-    if (binding >= _expected_tensor_count) throw std::out_of_range("Binding index exceeds expected tensor count");
-    return _bound_tensors[binding];
-}
-
-bool Kernel::are_tensors_bound() const {
-    for (const auto& wt : _bound_tensors) {
-        if (wt.expired()) return false;
-    }
-    return true;
+void Kernel::bind(u32 binding, std::shared_ptr<Tensor> tensor) {
+    QS_ASSERT(binding < _num_bindings, "Binding out of range");
+    _bindings[binding] = tensor;
 }
 
 void Kernel::clear_bindings() {
-    for (auto& wt : _bound_tensors) wt.reset();
+    for (auto& b : _bindings) b.reset();
 }
 
 void Kernel::execute(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
-    if (!_is_valid) throw std::runtime_error("Kernel is not valid");
-    if (!are_tensors_bound()) throw std::runtime_error("Not all required tensors are bound");
-    validate_execution_parameters(dispatch_x, dispatch_y, dispatch_z);
-
-    if (_push_constant_size > 0) {
-        if (!push_data) throw std::invalid_argument("Kernel expects push constants but none provided");
+    std::vector<BufferBinding> buffers(_bindings.size());
+    for (size_t i = 0; i < _bindings.size(); ++i) {
+        auto t = _bindings[i].lock();
+        QS_ASSERT(t, "Tensor binding expired");
+        buffers[i].buffer = &t->buffer();
+        buffers[i].offset = t->element_offset() * t->element_size();
+        buffers[i].range = t->size_bytes();
     }
+    _device->backend()->execute_compute(_pipeline, buffers, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
+}
 
-    // Collect raw buffer pointers in binding order for backend
-    std::vector<VulkanBackend::BufferBinding> bindings;
-    bindings.reserve(_expected_tensor_count);
-    for (u32 i = 0; i < _expected_tensor_count; ++i) {
-        auto sp = _bound_tensors[i].lock();
-        if (!sp) throw std::runtime_error("Bound tensor expired unexpectedly");
-    VulkanBackend::BufferBinding bb;
-    bb.buffer = &sp->get_buffer();
-    bb.offset = static_cast<VkDeviceSize>(sp->get_element_offset() * sp->get_element_size());
-    // range=0 means full buffer from offset
-    bb.range = 0;
-        bindings.push_back(bb);
+void Kernel::record(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
+    std::vector<BufferBinding> buffers(_bindings.size());
+    for (size_t i = 0; i < _bindings.size(); ++i) {
+        auto t = _bindings[i].lock();
+        QS_ASSERT(t, "Tensor binding expired");
+        buffers[i].buffer = &t->buffer();
+        buffers[i].offset = t->element_offset() * t->element_size();
+        buffers[i].range = t->size_bytes();
     }
-
-    _backend->execute_compute(_pipeline, dispatch_x, dispatch_y, dispatch_z,
-                              push_data, _push_constant_size, bindings);
+    _device->backend()->record_compute(_pipeline, buffers, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
 }
 
-void Kernel::record_execution(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
-    if (!_is_valid) throw std::runtime_error("Kernel is not valid");
-    if (!are_tensors_bound()) throw std::runtime_error("Not all required tensors are bound");
-    validate_execution_parameters(dispatch_x, dispatch_y, dispatch_z);
-
-    if (_push_constant_size > 0) {
-        if (!push_data) throw std::invalid_argument("Kernel expects push constants but none provided");
-    }
-
-    std::vector<VulkanBackend::BufferBinding> bindings;
-    bindings.reserve(_expected_tensor_count);
-    for (u32 i = 0; i < _expected_tensor_count; ++i) {
-        auto sp = _bound_tensors[i].lock();
-        if (!sp) throw std::runtime_error("Bound tensor expired unexpectedly");
-        VulkanBackend::BufferBinding bb;
-        bb.buffer = &sp->get_buffer();
-        bb.offset = 0;
-        bb.range = sp->get_buffer().size;
-        bindings.push_back(bb);
-    }
-
-    _backend->record_compute_dispatch(_pipeline, dispatch_x, dispatch_y, dispatch_z,
-                                      push_data, _push_constant_size, bindings);
+u32 Kernel::optimal_dispatch_1d(u32 total, u32 local_size) const {
+    return _device->backend()->optimal_dispatch_1d(total, local_size);
 }
 
-bool Kernel::is_valid() const {
-    return _is_valid && _backend && _pipeline.is_valid();
 }
-
-u32 Kernel::calculate_dispatch_1d(u32 total_elements, u32 local_size) const {
-    if (!_backend) throw std::runtime_error("Backend not available");
-    return _backend->calculate_dispatch_1d(total_elements, local_size);
-}
-
-bool Kernel::validate_push_constant_size(u32 data_size) const {
-    return data_size == _push_constant_size;
-}
-
-void Kernel::initialize_pipeline() {
-    try {
-        _pipeline = _backend->create_compute_pipeline(_glsl_source, _expected_tensor_count, _push_constant_size);
-        _is_valid = _pipeline.is_valid();
-        if (!_is_valid) throw std::runtime_error("Failed to create compute pipeline for kernel '" + _name + "'");
-    } catch (const std::exception& e) {
-        throw std::runtime_error(std::string("Failed to initialize kernel '") + _name + "': " + e.what());
-    }
-}
-
-void Kernel::cleanup_pipeline() {
-    if (_backend && _pipeline.is_valid()) {
-        _backend->destroy_compute_pipeline(_pipeline);
-    }
-    _pipeline = {};
-    _is_valid = false;
-}
-
-void Kernel::validate_execution_parameters(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z) const {
-    if (dispatch_x == 0 || dispatch_y == 0 || dispatch_z == 0) throw std::invalid_argument("Dispatch dimensions must be > 0");
-    auto limits = _backend->get_compute_limits();
-    if (dispatch_x > limits.max_work_group_count[0] ||
-        dispatch_y > limits.max_work_group_count[1] ||
-        dispatch_z > limits.max_work_group_count[2]) {
-        throw std::invalid_argument("Dispatch dimensions exceed device limits");
-    }
-}
-
-void Kernel::update_descriptor_bindings() {
-    // Backend now expects buffer list at dispatch time; nothing to do here.
-}
-
-} // namespace QuasarML

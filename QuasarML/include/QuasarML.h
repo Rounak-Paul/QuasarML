@@ -1,328 +1,249 @@
 #pragma once
 
-#include <Core/Accelerator.h>
-#include <Core/AcceleratorManager.h>
-#include <Core/Kernel.h>
+#include <Common/Types.h>
+#include <Common/Assert.h>
+#include <Common/Logger.h>
+#include <Core/Device.h>
+#include <Core/DeviceManager.h>
 #include <Core/Tensor.h>
-#include <Core/DataTypes.h>
-#include <memory>
-#include <vector>
+#include <Core/Kernel.h>
+#include <Ops/Elementwise.h>
+#include <Ops/Reduction.h>
+#include <Ops/LinAlg.h>
+#include <Ops/Manipulation.h>
 
 namespace qsml {
 
-using QuasarML::Accelerator;
-using QuasarML::AcceleratorManager;
+using QuasarML::Device;
+using QuasarML::DeviceManager;
+using QuasarML::Tensor;
 using QuasarML::Kernel;
+using QuasarML::DataType;
+using QuasarML::u8;
+using QuasarML::u16;
+using QuasarML::u32;
+using QuasarML::u64;
+using QuasarML::i8;
+using QuasarML::i16;
+using QuasarML::i32;
+using QuasarML::i64;
+using QuasarML::f32;
+using QuasarML::f64;
 
-using Tensor = std::shared_ptr<QuasarML::Tensor>;
+using TensorPtr = std::shared_ptr<Tensor>;
+using KernelPtr = std::shared_ptr<Kernel>;
 
 namespace detail {
-    inline Accelerator*& default_accelerator() {
-        static Accelerator* acc = nullptr;
-        return acc;
+    inline Device*& current_device_ptr() {
+        static Device* dev = nullptr;
+        return dev;
     }
-    
-    inline std::unique_ptr<Accelerator>& owned_accelerator() {
-        static std::unique_ptr<Accelerator> acc;
-        return acc;
-    }
+}
+
+inline void init() {
+    QuasarML::Logger::init();
+}
+
+inline void shutdown() {
+    QuasarML::DeviceManager::instance().shutdown();
+    QuasarML::Logger::shutdown();
 }
 
 inline u32 device_count() {
-    return AcceleratorManager::instance().get_device_count();
+    return DeviceManager::instance().device_count();
 }
 
 inline std::vector<std::string> device_names() {
-    return AcceleratorManager::instance().get_device_names();
+    return DeviceManager::instance().device_names();
 }
 
 inline void set_device(u32 device_id) {
-    AcceleratorManager::instance().set_default_device(device_id);
-    auto* acc = AcceleratorManager::instance().get_accelerator(device_id);
-    if (acc) {
-        detail::default_accelerator() = acc;
+    DeviceManager::instance().set_default(device_id);
+    detail::current_device_ptr() = DeviceManager::instance().get(device_id);
+}
+
+inline u32 current_device_id() {
+    return DeviceManager::instance().get_default();
+}
+
+inline Device& device() {
+    if (!detail::current_device_ptr()) {
+        detail::current_device_ptr() = DeviceManager::instance().get(0);
     }
+    QS_ASSERT(detail::current_device_ptr(), "No GPU device available");
+    return *detail::current_device_ptr();
 }
 
-inline u32 current_device() {
-    return AcceleratorManager::instance().get_default_device();
-}
-
-inline Accelerator& get_device(u32 device_id) {
-    auto* acc = AcceleratorManager::instance().get_accelerator(device_id);
-    if (!acc) {
-        throw std::runtime_error("Failed to get accelerator for device " + std::to_string(device_id));
-    }
-    return *acc;
-}
-
-inline void set_accelerator(Accelerator& acc) {
-    detail::default_accelerator() = &acc;
-}
-
-inline Accelerator& accelerator() {
-    if (!detail::default_accelerator()) {
-        detail::owned_accelerator() = std::make_unique<Accelerator>("QuasarML");
-        detail::default_accelerator() = detail::owned_accelerator().get();
-    }
-    return *detail::default_accelerator();
+inline Device& device(u32 device_id) {
+    Device* dev = DeviceManager::instance().get(device_id);
+    QS_ASSERT(dev, "Failed to get device");
+    return *dev;
 }
 
 inline bool is_valid() {
-    return accelerator().is_valid();
-}
-
-inline void enable_auto_batching(bool enable = true) {
-    accelerator().enable_auto_batching(enable);
-}
-
-inline bool is_auto_batching_enabled() {
-    return accelerator().is_auto_batching_enabled();
-}
-
-inline void flush_pipeline() {
-    accelerator().flush_pipeline();
+    return detail::current_device_ptr() && detail::current_device_ptr()->is_valid();
 }
 
 inline void synchronize() {
-    accelerator().synchronize();
+    device().synchronize();
 }
 
-inline Tensor zeros(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
-    auto t = accelerator().create_tensor(shape, dtype);
+inline TensorPtr zeros(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
+    auto t = device().create_tensor(shape, dtype);
     t->zero();
     return t;
 }
 
-inline Tensor ones(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
-    auto t = accelerator().create_tensor(shape, dtype);
+inline TensorPtr ones(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
+    auto t = device().create_tensor(shape, dtype);
     if (dtype == DataType::F32) {
-        float one = 1.0f;
+        f32 one = 1.0f;
         t->fill(&one);
     } else if (dtype == DataType::I32) {
-        int32_t one = 1;
+        i32 one = 1;
         t->fill(&one);
     }
     return t;
 }
 
-inline Tensor empty(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
-    return accelerator().create_tensor(shape, dtype);
+inline TensorPtr empty(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
+    return device().create_tensor(shape, dtype);
 }
 
-inline Tensor randn(const std::vector<u32>& shape, DataType dtype = DataType::F32, float mean = 0.0f, float stddev = 1.0f) {
-    return accelerator().ops().random_normal(shape, dtype, mean, stddev);
+inline TensorPtr tensor(const std::vector<f32>& data, const std::vector<u32>& shape, DataType dtype = DataType::F32) {
+    auto t = device().create_tensor(shape, dtype);
+    t->upload(data.data(), data.size() * sizeof(f32));
+    return t;
 }
 
-inline Tensor rand(const std::vector<u32>& shape, DataType dtype = DataType::F32, float low = 0.0f, float high = 1.0f) {
-    return accelerator().ops().random_uniform(shape, dtype, low, high);
+inline TensorPtr from_data(const void* data, const std::vector<u32>& shape, DataType dtype = DataType::F32) {
+    auto t = device().create_tensor(shape, dtype);
+    t->upload(data, t->numel() * QuasarML::dtype_size(dtype));
+    return t;
 }
 
-inline Tensor tensor(const std::vector<float>& data, const std::vector<u32>& shape, DataType dtype = DataType::F32) {
-    return accelerator().create_tensor(data.data(), shape, dtype);
+inline TensorPtr add(TensorPtr a, TensorPtr b) {
+    return QuasarML::Ops::add(device(), a, b);
 }
 
-inline Tensor from_data(const void* data, const std::vector<u32>& shape, DataType dtype = DataType::F32) {
-    return accelerator().create_tensor(data, shape, dtype);
+inline TensorPtr sub(TensorPtr a, TensorPtr b) {
+    return QuasarML::Ops::subtract(device(), a, b);
 }
 
-inline Tensor add(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().add(a, b);
+inline TensorPtr mul(TensorPtr a, TensorPtr b) {
+    return QuasarML::Ops::multiply(device(), a, b);
 }
 
-inline Tensor sub(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().sub(a, b);
+inline TensorPtr div(TensorPtr a, TensorPtr b) {
+    return QuasarML::Ops::divide(device(), a, b);
 }
 
-inline Tensor mul(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().mul(a, b);
+inline TensorPtr neg(TensorPtr x) {
+    return QuasarML::Ops::neg(device(), x);
 }
 
-inline Tensor div(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().div(a, b);
+inline TensorPtr abs(TensorPtr x) {
+    return QuasarML::Ops::abs(device(), x);
 }
 
-inline Tensor pow(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().pow(a, b);
+inline TensorPtr add_scalar(TensorPtr x, f32 scalar) {
+    return QuasarML::Ops::add_scalar(device(), x, scalar);
 }
 
-inline Tensor abs(Tensor x) {
-    return x->get_accelerator()->ops().abs(x);
+inline TensorPtr mul_scalar(TensorPtr x, f32 scalar) {
+    return QuasarML::Ops::multiply_scalar(device(), x, scalar);
 }
 
-inline Tensor neg(Tensor x) {
-    return x->get_accelerator()->ops().neg(x);
+inline TensorPtr sqrt(TensorPtr x) {
+    return QuasarML::Ops::sqrt(device(), x);
 }
 
-inline Tensor clamp(Tensor x, float min_val, float max_val) {
-    return x->get_accelerator()->ops().clamp(x, min_val, max_val);
+inline TensorPtr exp(TensorPtr x) {
+    return QuasarML::Ops::exp(device(), x);
 }
 
-inline Tensor add_scalar(Tensor x, float scalar) {
-    return x->get_accelerator()->ops().add_scalar(x, scalar);
+inline TensorPtr log(TensorPtr x) {
+    return QuasarML::Ops::log(device(), x);
 }
 
-inline Tensor mul_scalar(Tensor x, float scalar) {
-    return x->get_accelerator()->ops().mul_scalar(x, scalar);
+inline TensorPtr sin(TensorPtr x) {
+    return QuasarML::Ops::sin(device(), x);
 }
 
-inline Tensor relu(Tensor x) {
-    return x->get_accelerator()->ops().relu(x);
+inline TensorPtr cos(TensorPtr x) {
+    return QuasarML::Ops::cos(device(), x);
 }
 
-inline Tensor sigmoid(Tensor x) {
-    return x->get_accelerator()->ops().sigmoid(x);
+inline TensorPtr tanh(TensorPtr x) {
+    return QuasarML::Ops::tanh(device(), x);
 }
 
-inline Tensor tanh(Tensor x) {
-    return x->get_accelerator()->ops().tanh(x);
+inline TensorPtr relu(TensorPtr x) {
+    return QuasarML::Ops::relu(device(), x);
 }
 
-inline Tensor softmax(Tensor x, int axis = -1) {
-    return x->get_accelerator()->ops().softmax(x, axis);
+inline TensorPtr sigmoid(TensorPtr x) {
+    return QuasarML::Ops::sigmoid(device(), x);
 }
 
-inline Tensor gelu(Tensor x) {
-    auto& acc = *x->get_accelerator();
-    auto half = acc.ops().mul_scalar(x, 0.5f);
-    auto cubed_term = acc.ops().mul(x, acc.ops().mul(x, x));
-    auto inner = acc.ops().add(x, acc.ops().mul_scalar(cubed_term, 0.044715f));
-    auto tanhval = acc.ops().tanh(acc.ops().mul_scalar(inner, 0.7978845608f));
-    auto one_plus = acc.ops().add_scalar(tanhval, 1.0f);
-    return acc.ops().mul(half, one_plus);
+inline TensorPtr gelu(TensorPtr x) {
+    return QuasarML::Ops::gelu(device(), x);
 }
 
-inline Tensor exp(Tensor x) {
-    return x->get_accelerator()->ops().exp(x);
+inline TensorPtr softmax(TensorPtr x, i32 axis = -1) {
+    return QuasarML::Ops::softmax(device(), x, axis);
 }
 
-inline Tensor log(Tensor x) {
-    return x->get_accelerator()->ops().log(x);
+inline TensorPtr sum(TensorPtr x) {
+    return QuasarML::Ops::sum(device(), x);
 }
 
-inline Tensor sin(Tensor x) {
-    return x->get_accelerator()->ops().sin(x);
+inline TensorPtr sum(TensorPtr x, i32 axis, bool keepdims = false) {
+    return QuasarML::Ops::sum(device(), x, axis, keepdims);
 }
 
-inline Tensor cos(Tensor x) {
-    return x->get_accelerator()->ops().cos(x);
+inline TensorPtr mean(TensorPtr x) {
+    return QuasarML::Ops::mean(device(), x);
 }
 
-inline Tensor sqrt(Tensor x) {
-    return x->get_accelerator()->ops().sqrt(x);
+inline TensorPtr mean(TensorPtr x, i32 axis, bool keepdims = false) {
+    return QuasarML::Ops::mean(device(), x, axis, keepdims);
 }
 
-inline Tensor matmul(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().matmul(a, b);
+inline TensorPtr max(TensorPtr x) {
+    return QuasarML::Ops::max(device(), x);
 }
 
-inline Tensor dot(Tensor a, Tensor b) {
-    return a->get_accelerator()->ops().dot(a, b);
+inline TensorPtr min(TensorPtr x) {
+    return QuasarML::Ops::min(device(), x);
 }
 
-inline Tensor transpose(Tensor x) {
-    return x->get_accelerator()->ops().transpose(x);
+inline TensorPtr matmul(TensorPtr a, TensorPtr b) {
+    return QuasarML::Ops::matmul(device(), a, b);
 }
 
-inline Tensor permute(Tensor x, const std::vector<u32>& dims) {
-    return x->get_accelerator()->ops().permute(x, dims);
+inline TensorPtr transpose(TensorPtr x) {
+    return QuasarML::Ops::transpose(device(), x);
 }
 
-inline Tensor sum(Tensor x, u32 axis) {
-    return x->get_accelerator()->ops().sum_axis(x, axis);
+inline TensorPtr reshape(TensorPtr x, const std::vector<u32>& new_shape) {
+    return QuasarML::Ops::reshape(device(), x, new_shape);
 }
 
-inline Tensor sum_axis(Tensor x, u32 axis) {
-    return sum(x, axis);
+inline TensorPtr flatten(TensorPtr x) {
+    return QuasarML::Ops::flatten(device(), x);
 }
 
-inline Tensor mean(Tensor x, u32 axis) {
-    return x->get_accelerator()->ops().mean_axis(x, axis);
+inline TensorPtr squeeze(TensorPtr x) {
+    return QuasarML::Ops::squeeze(device(), x);
 }
 
-inline Tensor mean_axis(Tensor x, u32 axis) {
-    return mean(x, axis);
+inline TensorPtr unsqueeze(TensorPtr x, i32 dim) {
+    return QuasarML::Ops::unsqueeze(device(), x, dim);
 }
 
-inline Tensor min(Tensor x, u32 axis) {
-    return x->get_accelerator()->ops().min_axis(x, axis);
-}
-
-inline Tensor min_axis(Tensor x, u32 axis) {
-    return min(x, axis);
-}
-
-inline Tensor max(Tensor x, u32 axis) {
-    return x->get_accelerator()->ops().max_axis(x, axis);
-}
-
-inline Tensor max_axis(Tensor x, u32 axis) {
-    return max(x, axis);
-}
-
-inline Tensor layer_norm(Tensor x, Tensor gamma, Tensor beta, float epsilon = 1e-5f) {
-    return x->get_accelerator()->ops().layer_norm(x, gamma, beta, epsilon);
-}
-
-inline Tensor cat(const std::vector<Tensor>& tensors, u32 axis = 0) {
-    if (tensors.empty()) throw std::invalid_argument("Cannot concatenate empty tensor list");
-    return tensors[0]->get_accelerator()->ops().concatenate(tensors, axis);
-}
-
-inline Tensor concatenate(const std::vector<Tensor>& tensors, u32 axis = 0) {
-    return cat(tensors, axis);
-}
-
-inline std::vector<Tensor> split(Tensor x, u32 num_splits, u32 axis = 0) {
-    return x->get_accelerator()->ops().split(x, num_splits, axis);
-}
-
-inline Tensor squeeze(Tensor x, int axis = -1) {
-    return x->get_accelerator()->ops().squeeze(x, axis);
-}
-
-inline Tensor unsqueeze(Tensor x, u32 axis) {
-    return x->get_accelerator()->ops().unsqueeze(x, axis);
-}
-
-inline Tensor reshape(Tensor x, const std::vector<u32>& shape) {
-    return x->create_reshaped_view(shape);
-}
-
-inline Tensor flatten(Tensor x) {
-    return x->create_flattened_view();
-}
-
-inline Tensor slice(Tensor x, const std::vector<u32>& start, const std::vector<u32>& lengths) {
-    return x->get_accelerator()->ops().slice(x, start, lengths);
-}
-
-inline std::vector<u32> shape(Tensor x) {
-    return x->get_shape();
-}
-
-inline std::string shape_str(Tensor x) {
-    return x->get_shape_string();
-}
-
-inline u32 ndim(Tensor x) {
-    return x->get_rank();
-}
-
-inline u64 numel(Tensor x) {
-    return x->get_element_count();
-}
-
-inline DataType dtype(Tensor x) {
-    return x->get_dtype();
-}
-
-inline void save(Tensor x, const std::string& path) {
-    x->get_accelerator()->ops().save_tensor(x, path);
-}
-
-inline Tensor load(const std::string& path) {
-    return accelerator().ops().load_tensor(path);
+inline TensorPtr copy(TensorPtr x) {
+    return QuasarML::Ops::copy(device(), x);
 }
 
 }

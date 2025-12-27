@@ -1,142 +1,85 @@
-
-
 #pragma once
 
-#include <qspch.h>
-#include "DataTypes.h"
-#include <VulkanBackend/VulkanBackend.h>
+#include <Common/Types.h>
+#include <Backend/BackendInterface.h>
 #include <memory>
-#include <string>
 #include <vector>
+#include <string>
 #include <numeric>
 #include <functional>
 
 namespace QuasarML {
 
-class Accelerator;
+class Device;
 
 class Tensor : public std::enable_shared_from_this<Tensor> {
 public:
-    Tensor(Accelerator* accelerator,
-           VulkanBackend* backend,
-           const std::vector<u32>& shape,
-           DataType dtype = DataType::F32,
-           bool host_visible = false);
-
+    Tensor(Device* device, const std::vector<u32>& shape, DataType dtype = DataType::F32, bool host_visible = false);
     ~Tensor();
-
+    
     Tensor(const Tensor&) = delete;
     Tensor& operator=(const Tensor&) = delete;
     Tensor(Tensor&& other) noexcept;
     Tensor& operator=(Tensor&& other) noexcept;
-
-    void upload_data(const void* data);
-    void upload_data(const void* data, u64 size_bytes, u64 offset_bytes = 0);
-    void download_data(void* data) const;
-    void download_data(void* data, u64 size_bytes, u64 offset_bytes = 0) const;
+    
+    void upload(const void* data);
+    void upload(const void* data, u64 size, u64 offset = 0);
+    void download(void* data) const;
+    void download(void* data, u64 size, u64 offset = 0) const;
     void fill(const void* value);
     void zero();
     void copy_from(const Tensor& src);
-
-    const std::vector<u32>& get_shape() const { return _shape; }
-    u32 get_rank() const { return static_cast<u32>(_shape.size()); }
-    u32 get_dimension_size(u32 dimension) const;
-    u64 get_element_count() const { return _element_count; }
-    DataType get_dtype() const { return _dtype; }
-    u32 get_element_size() const { return get_dtype_size(_dtype); }
-    u64 get_size_bytes() const { return _element_count * get_element_size(); }
-    bool is_host_visible() const { return _host_visible; }
-
-    Tensor& reshape(const std::vector<u32>& new_shape);
-    std::shared_ptr<Tensor> create_reshaped_view(const std::vector<u32>& new_shape) const;
-    Tensor& flatten();
-    std::shared_ptr<Tensor> create_flattened_view() const;
-
-    bool is_valid() const;
-    bool is_shape_compatible(const Tensor& other) const;
-    bool is_broadcastable_to(const std::vector<u32>& target_shape) const;
-    bool validate_for_compute() const;
-
-    std::string get_shape_string() const;
-    std::string get_info_string() const;
-    std::vector<u64> calculate_strides() const;
-    std::vector<u32> unravel_index(u64 flat_index) const;
-    u64 ravel_index(const std::vector<u32>& coords) const;
-
-    VulkanBackend::Buffer& get_buffer() { return _buffer; }
-    const VulkanBackend::Buffer& get_buffer() const { return _buffer; }
-    u64 get_element_offset() const { return _element_offset; }
-
-    Tensor(Accelerator* accelerator,
-           VulkanBackend* backend,
-           VulkanBackend::Buffer buffer,
-           const std::vector<u32>& shape,
-           DataType dtype,
-           bool host_visible,
-           bool owns_buffer = true);
-           
-    Tensor(Accelerator* accelerator,
-           VulkanBackend* backend,
-           VulkanBackend::Buffer buffer,
-           const std::vector<u32>& shape,
-           DataType dtype,
-           bool host_visible,
-           u64 element_offset,
-           bool owns_buffer = true);
-
-    std::shared_ptr<Tensor> operator+(const std::shared_ptr<Tensor>& other) const;
-    std::shared_ptr<Tensor> operator-(const std::shared_ptr<Tensor>& other) const;
-    std::shared_ptr<Tensor> operator*(const std::shared_ptr<Tensor>& other) const;
-    std::shared_ptr<Tensor> operator/(const std::shared_ptr<Tensor>& other) const;
-
-    std::shared_ptr<Tensor> operator+(float scalar) const;
-    std::shared_ptr<Tensor> operator-(float scalar) const;
-    std::shared_ptr<Tensor> operator*(float scalar) const;
-    std::shared_ptr<Tensor> operator/(float scalar) const;
-
-    friend std::shared_ptr<Tensor> operator+(float scalar, const Tensor& tensor);
-    friend std::shared_ptr<Tensor> operator-(float scalar, const Tensor& tensor);
-    friend std::shared_ptr<Tensor> operator*(float scalar, const Tensor& tensor);
-    friend std::shared_ptr<Tensor> operator/(float scalar, const Tensor& tensor);
     
-    Accelerator* get_accelerator() const { return _accelerator; }
-
-    std::shared_ptr<Tensor> create_view_with_shape(const std::vector<u32>& new_shape) const;
-    std::shared_ptr<Tensor> create_view_with_shape_and_offset(const std::vector<u32>& new_shape, u64 element_offset) const;
+    const std::vector<u32>& shape() const { return _shape; }
+    u32 rank() const { return static_cast<u32>(_shape.size()); }
+    u32 dim(u32 i) const;
+    u64 numel() const { return _numel; }
+    DataType dtype() const { return _dtype; }
+    u32 element_size() const { return dtype_size(_dtype); }
+    u64 size_bytes() const { return _numel * element_size(); }
+    bool is_host_visible() const { return _host_visible; }
+    
+    Tensor& reshape(const std::vector<u32>& new_shape);
+    std::shared_ptr<Tensor> view(const std::vector<u32>& new_shape) const;
+    std::shared_ptr<Tensor> flatten() const;
+    
+    bool is_valid() const { return _valid; }
+    bool is_shape_compatible(const Tensor& other) const;
+    bool is_broadcastable(const std::vector<u32>& target) const;
+    
+    std::string shape_str() const;
+    std::string info() const;
+    std::vector<u64> strides() const;
+    
+    BufferHandle& buffer() { return _buffer; }
+    const BufferHandle& buffer() const { return _buffer; }
+    u64 element_offset() const { return _element_offset; }
+    Device* device() const { return _device; }
+    
+    Tensor(Device* device, BufferHandle buffer, const std::vector<u32>& shape, 
+           DataType dtype, bool host_visible, u64 element_offset = 0, bool owns_buffer = true);
 
 private:
-    Accelerator* _accelerator;
-    VulkanBackend* _backend;
+    Device* _device;
     std::vector<u32> _shape;
     DataType _dtype;
-    u64 _element_count;
+    u64 _numel;
     bool _host_visible;
-    VulkanBackend::Buffer _buffer;
-    bool _is_valid;
+    BufferHandle _buffer;
     u64 _element_offset = 0;
     bool _owns_buffer = true;
-
-    void calculate_element_count();
-    void check_accelerator_match(const std::shared_ptr<Tensor>& other) const;
-    void allocate_buffer();
+    bool _valid = false;
+    
+    void compute_numel();
+    void alloc_buffer();
     void validate_shape(const std::vector<u32>& shape) const;
-    void validate_data_transfer(u64 size_bytes, u64 offset_bytes = 0) const;
-    void cleanup_buffer();
 };
 
-inline u64 calculate_element_count(const std::vector<u32>& shape) {
+inline u64 compute_numel(const std::vector<u32>& shape) {
     return std::accumulate(shape.begin(), shape.end(), 1ULL, std::multiplies<u64>());
 }
 
-inline bool shapes_equal(const std::vector<u32>& a, const std::vector<u32>& b) { 
-    return a == b; 
-}
-
-inline bool is_valid_shape(const std::vector<u32>& shape) {
-    if (shape.empty()) return false;
-    for (auto d : shape) if (d == 0) return false;
-    return true;
-}
+inline bool shapes_equal(const std::vector<u32>& a, const std::vector<u32>& b) { return a == b; }
 
 std::string shape_to_string(const std::vector<u32>& shape);
 

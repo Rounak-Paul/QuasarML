@@ -1,123 +1,165 @@
-#include "QuasarML.h"
+#include <QuasarML.h>
+#include <iostream>
 #include <chrono>
 #include <iomanip>
-#include <iostream>
 
-using namespace std::chrono;
+using namespace std;
 
-class Benchmark {
-private:
-    const int warmup = 10;
-    const int iters = 5;
-
-    template<typename Func>
-    double time_op(Func&& op) {
-        for (int i = 0; i < warmup; i++) op();
-        qsml::accelerator().synchronize();
-
-        auto start = high_resolution_clock::now();
-        for (int i = 0; i < iters; i++) op();
-        qsml::accelerator().synchronize();
-        auto end = high_resolution_clock::now();
-
-        return duration_cast<microseconds>(end - start).count() / 1000.0;
+void benchmark_elementwise(qsml::u32 size, int iterations) {
+    cout << "\n=== Elementwise Operations (" << size << " elements) ===\n";
+    
+    auto a = qsml::ones({size});
+    auto b = qsml::ones({size});
+    
+    qsml::synchronize();
+    
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::add(a, b);
     }
-
-    void print_result(const std::string& name, size_t ops, double time_ms) {
-        double gflops = (ops * iters) / (time_ms * 1e6);
-        double tflops = gflops / 1000.0;
-        std::cout << "  " << std::setw(35) << std::left << name;
-        std::cout << std::setw(10) << std::right << std::fixed << std::setprecision(2) << time_ms << " ms";
-        std::cout << std::setw(12) << std::fixed << std::setprecision(4) << tflops << " TFLOPS\n";
+    qsml::synchronize();
+    auto end = chrono::high_resolution_clock::now();
+    
+    double ms = chrono::duration<double, milli>(end - start).count();
+    double gflops = (double)size * iterations / (ms * 1e6);
+    cout << "  add: " << fixed << setprecision(2) << ms / iterations << " ms/op, " << gflops << " GFLOPS\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::mul(a, b);
     }
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    
+    ms = chrono::duration<double, milli>(end - start).count();
+    gflops = (double)size * iterations / (ms * 1e6);
+    cout << "  mul: " << fixed << setprecision(2) << ms / iterations << " ms/op, " << gflops << " GFLOPS\n";
+}
 
-public:
-    void prewarm() {
-        auto dummy_a_f32 = qsml::randn({256, 256}, DataType::F32);
-        auto dummy_b_f32 = qsml::randn({256, 256}, DataType::F32);
-        
-        for (int i = 0; i < 10; i++) {
-            auto c = qsml::matmul(dummy_a_f32, dummy_b_f32);
-            auto d = qsml::add(dummy_a_f32, dummy_b_f32);
-            auto e = qsml::mul(dummy_a_f32, dummy_b_f32);
-            auto f = qsml::relu(dummy_a_f32);
-            auto g = qsml::sigmoid(dummy_a_f32);
-        }
-        qsml::accelerator().synchronize();
+void benchmark_matmul(qsml::u32 n, int iterations) {
+    cout << "\n=== Matrix Multiplication (" << n << "x" << n << ") ===\n";
+    
+    auto a = qsml::ones({n, n});
+    auto b = qsml::ones({n, n});
+    
+    qsml::synchronize();
+    
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::matmul(a, b);
     }
+    qsml::synchronize();
+    auto end = chrono::high_resolution_clock::now();
+    
+    double ms = chrono::duration<double, milli>(end - start).count();
+    double flops = 2.0 * n * n * n * iterations;
+    double gflops = flops / (ms * 1e6);
+    cout << "  matmul: " << fixed << setprecision(2) << ms / iterations << " ms/op, " << gflops << " GFLOPS\n";
+}
 
-    void run() {
-        std::cout << "\n=== QuasarML Performance Benchmark ===\n";
-        std::cout << "Compiling shaders and warming up GPU...\n";
-        prewarm();
-        std::cout << "Benchmark ready. Measuring pure execution time...\n\n";
-
-        matmul();
-        elementwise();
-        allocation_speed();
+void benchmark_activations(qsml::u32 size, int iterations) {
+    cout << "\n=== Activation Functions (" << size << " elements) ===\n";
+    
+    auto a = qsml::ones({size});
+    qsml::synchronize();
+    
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::relu(a);
     }
-
-    void matmul() {
-        std::cout << "Matrix Multiplication:\n";
-        
-        for (auto N : {256, 512, 1024, 2048}) {
-            auto a = qsml::randn({(u32)N, (u32)N}, DataType::F32);
-            auto b = qsml::randn({(u32)N, (u32)N}, DataType::F32);
-            
-            auto t = time_op([&]() { auto c = qsml::matmul(a, b); });
-            print_result("MatMul " + std::to_string(N) + "x" + std::to_string(N), 
-                        2LL * N * N * N, t);
-        }
-        std::cout << "\n";
+    qsml::synchronize();
+    auto end = chrono::high_resolution_clock::now();
+    double ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  relu: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::sigmoid(a);
     }
-
-    void elementwise() {
-        std::cout << "Elementwise Operations (16M elements):\n";
-        
-        const size_t N = 16 * 1024 * 1024;
-        auto a = qsml::randn({(u32)N}, DataType::F32);
-        auto b = qsml::randn({(u32)N}, DataType::F32);
-
-        print_result("Add", N, time_op([&]() { auto c = qsml::add(a, b); }));
-        print_result("Mul", N, time_op([&]() { auto c = qsml::mul(a, b); }));
-        print_result("ReLU", N, time_op([&]() { auto c = qsml::relu(a); }));
-        print_result("Sigmoid", N * 10, time_op([&]() { auto c = qsml::sigmoid(a); }));
-
-        std::cout << "\n";
-        std::cout << "Pipelined Operations (batched without sync):\n";
-        
-        auto t_batched = time_op([&]() {
-            auto c = qsml::add(a, b);
-            auto d = qsml::mul(c, a);
-            auto e = qsml::relu(d);
-            auto f = qsml::sigmoid(e);
-        });
-        
-        print_result("4 ops batched", N * 13, t_batched);
-        std::cout << "  (vs " << std::fixed << std::setprecision(2) 
-                  << (27.4 + 30.9 + 28.0 + 29.5) << " ms if done separately)\n";
-
-        std::cout << "\n";
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  sigmoid: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::gelu(a);
     }
-
-    void allocation_speed() {
-        std::cout << "VMA Allocation Performance:\n";
-        
-        auto start = high_resolution_clock::now();
-        for (int i = 0; i < 100; i++) {
-            auto t = qsml::zeros({512, 512}, DataType::F32);
-        }
-        auto end = high_resolution_clock::now();
-        auto ms = duration_cast<microseconds>(end - start).count() / 1000.0;
-        
-        std::cout << "  100 allocations (512x512):    " << std::fixed << std::setprecision(2) << ms << " ms\n";
-        std::cout << "  Average per allocation:        " << (ms / 100.0) << " ms\n";
-        std::cout << "\n";
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  gelu: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::softmax(a);
     }
-};
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  softmax: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+}
+
+void benchmark_reductions(qsml::u32 size, int iterations) {
+    cout << "\n=== Reduction Operations (" << size << " elements) ===\n";
+    
+    auto a = qsml::ones({size});
+    qsml::synchronize();
+    
+    auto start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::sum(a);
+    }
+    qsml::synchronize();
+    auto end = chrono::high_resolution_clock::now();
+    double ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  sum: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::mean(a);
+    }
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  mean: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+    
+    start = chrono::high_resolution_clock::now();
+    for (int i = 0; i < iterations; i++) {
+        auto c = qsml::max(a);
+    }
+    qsml::synchronize();
+    end = chrono::high_resolution_clock::now();
+    ms = chrono::duration<double, milli>(end - start).count();
+    cout << "  max: " << fixed << setprecision(2) << ms / iterations << " ms/op\n";
+}
+
+static void run_all_benchmarks() {
+    auto& dev = qsml::device();
+    cout << "\nDevice: " << dev.name() << "\n";
+    
+    benchmark_elementwise(1000000, 100);
+    benchmark_elementwise(10000000, 50);
+    
+    benchmark_matmul(256, 50);
+    benchmark_matmul(512, 20);
+    benchmark_matmul(1024, 10);
+    
+    benchmark_activations(1000000, 100);
+    
+    benchmark_reductions(1000000, 100);
+}
 
 int main() {
-    Benchmark bench;
-    bench.run();
+    cout << "QuasarML Performance Benchmarks\n";
+    cout << "================================\n";
+    
+    qsml::init();
+    run_all_benchmarks();
+    qsml::shutdown();
+    
+    cout << "\n================================\n";
+    cout << "Benchmark complete\n";
+    
     return 0;
 }
