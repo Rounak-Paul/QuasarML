@@ -146,6 +146,8 @@ static void run_all_benchmarks() {
     benchmark_matmul(1024, 10);
     benchmark_matmul(2048, 5);
     benchmark_matmul(4096, 2);
+    benchmark_matmul(8192, 2);
+    benchmark_matmul(16384, 1);
     
     benchmark_activations(1000000, 100);
     
