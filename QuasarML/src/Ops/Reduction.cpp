@@ -227,7 +227,6 @@ std::shared_ptr<Tensor> reduce_full(Device& device, std::shared_ptr<Tensor> a, c
     kernel->bind(1, temp);
     u32 groups = kernel->optimal_dispatch_1d(count);
     kernel->execute(groups, 1, 1, &count);
-    device.synchronize();
     
     while (num_workgroups > 1) {
         u32 next_workgroups = (num_workgroups + wg_size - 1) / wg_size;
@@ -238,7 +237,6 @@ std::shared_ptr<Tensor> reduce_full(Device& device, std::shared_ptr<Tensor> a, c
         kernel->bind(1, next);
         u32 g = kernel->optimal_dispatch_1d(num_workgroups);
         kernel->execute(g, 1, 1, &num_workgroups);
-        device.synchronize();
         
         temp = next;
         num_workgroups = next_workgroups;
@@ -264,7 +262,6 @@ std::shared_ptr<Tensor> reduce_full_subgroup(Device& device, std::shared_ptr<Ten
     kernel->bind(1, temp);
     u32 groups = kernel->optimal_dispatch_1d(count);
     kernel->execute(groups, 1, 1, &count);
-    device.synchronize();
     
     while (num_workgroups > 1) {
         u32 next_workgroups = (num_workgroups + wg_size - 1) / wg_size;
@@ -275,7 +272,6 @@ std::shared_ptr<Tensor> reduce_full_subgroup(Device& device, std::shared_ptr<Ten
         kernel->bind(1, next);
         u32 g = kernel->optimal_dispatch_1d(num_workgroups);
         kernel->execute(g, 1, 1, &num_workgroups);
-        device.synchronize();
         
         temp = next;
         num_workgroups = next_workgroups;
@@ -344,7 +340,6 @@ std::shared_ptr<Tensor> sum(Device& device, std::shared_ptr<Tensor> a, i32 axis,
     u32 n = static_cast<u32>(outer * inner);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }

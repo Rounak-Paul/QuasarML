@@ -149,7 +149,6 @@ std::shared_ptr<Tensor> add(Device& device, std::shared_ptr<Tensor> a, std::shar
     kernel->bind(2, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -167,7 +166,6 @@ std::shared_ptr<Tensor> subtract(Device& device, std::shared_ptr<Tensor> a, std:
     kernel->bind(2, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -185,7 +183,6 @@ std::shared_ptr<Tensor> multiply(Device& device, std::shared_ptr<Tensor> a, std:
     kernel->bind(2, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -203,7 +200,6 @@ std::shared_ptr<Tensor> divide(Device& device, std::shared_ptr<Tensor> a, std::s
     kernel->bind(2, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -222,7 +218,6 @@ std::shared_ptr<Tensor> add_scalar(Device& device, std::shared_ptr<Tensor> a, f3
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(pc.n);
     kernel->execute(groups, 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }
@@ -241,7 +236,6 @@ std::shared_ptr<Tensor> multiply_scalar(Device& device, std::shared_ptr<Tensor> 
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(pc.n);
     kernel->execute(groups, 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }
@@ -255,7 +249,6 @@ std::shared_ptr<Tensor> neg(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -269,7 +262,6 @@ std::shared_ptr<Tensor> abs(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -283,7 +275,6 @@ std::shared_ptr<Tensor> sqrt(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -297,7 +288,6 @@ std::shared_ptr<Tensor> exp(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -311,7 +301,6 @@ std::shared_ptr<Tensor> log(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -325,7 +314,6 @@ std::shared_ptr<Tensor> sin(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -339,7 +327,6 @@ std::shared_ptr<Tensor> cos(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -353,7 +340,6 @@ std::shared_ptr<Tensor> tanh(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -370,7 +356,6 @@ std::shared_ptr<Tensor> relu(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -387,7 +372,6 @@ std::shared_ptr<Tensor> sigmoid(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -404,7 +388,6 @@ std::shared_ptr<Tensor> gelu(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }
@@ -429,7 +412,6 @@ std::shared_ptr<Tensor> softmax(Device& device, std::shared_ptr<Tensor> a, i32 a
     kernel->bind(0, a);
     kernel->bind(1, result);
     kernel->execute(static_cast<u32>(batch_size), 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }

@@ -72,6 +72,7 @@ public:
                                 const void* push_data = nullptr, u32 push_size = 0) = 0;
     virtual void end_recording() = 0;
     
+    virtual void flush_pending() = 0;
     virtual void synchronize() = 0;
     virtual void memory_barrier() = 0;
     virtual void device_wait_idle() = 0;

@@ -249,7 +249,6 @@ std::shared_ptr<Tensor> matmul(Device& device, std::shared_ptr<Tensor> a, std::s
     u32 gx = (M + params.effective_tile - 1) / params.effective_tile;
     u32 gy = (N + params.effective_tile - 1) / params.effective_tile;
     kernel->execute(gx, gy, 1, &pc);
-    device.synchronize();
     
     return result;
 }
@@ -292,7 +291,6 @@ std::shared_ptr<Tensor> dot(Device& device, std::shared_ptr<Tensor> a, std::shar
     kernel->bind(2, temp);
     u32 groups = kernel->optimal_dispatch_1d(count);
     kernel->execute(groups, 1, 1, &count);
-    device.synchronize();
     
     while (num_workgroups > 1) {
         u32 next_workgroups = (num_workgroups + WG - 1) / WG;
@@ -303,7 +301,6 @@ std::shared_ptr<Tensor> dot(Device& device, std::shared_ptr<Tensor> a, std::shar
         kernel->bind(2, next);
         u32 g = kernel->optimal_dispatch_1d(num_workgroups);
         kernel->execute(g, 1, 1, &num_workgroups);
-        device.synchronize();
         
         temp = next;
         num_workgroups = next_workgroups;
@@ -327,7 +324,6 @@ std::shared_ptr<Tensor> transpose(Device& device, std::shared_ptr<Tensor> a) {
     u32 n = rows * cols;
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }
@@ -355,7 +351,6 @@ std::shared_ptr<Tensor> outer(Device& device, std::shared_ptr<Tensor> a, std::sh
     u32 n = M * N;
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &pc);
-    device.synchronize();
     
     return result;
 }

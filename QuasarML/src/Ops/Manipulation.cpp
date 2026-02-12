@@ -179,7 +179,6 @@ std::shared_ptr<Tensor> copy(Device& device, std::shared_ptr<Tensor> a) {
     kernel->bind(1, result);
     u32 groups = kernel->optimal_dispatch_1d(n);
     kernel->execute(groups, 1, 1, &n);
-    device.synchronize();
     
     return result;
 }

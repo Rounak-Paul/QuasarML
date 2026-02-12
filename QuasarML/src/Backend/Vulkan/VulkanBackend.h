@@ -10,6 +10,10 @@
 
 namespace QuasarML {
 
+static constexpr u32 FRAMES_IN_FLIGHT = 2;
+static constexpr u32 MAX_BINDINGS = 8;
+static constexpr u32 MAX_DISPATCHES_PER_BATCH = 16;
+
 struct DeletionQueue {
     std::deque<std::function<void()>> deletors;
     
@@ -53,6 +57,7 @@ public:
                         const void* push_data = nullptr, u32 push_size = 0) override;
     void end_recording() override;
     
+    void flush_pending() override;
     void synchronize() override;
     void memory_barrier() override;
     void device_wait_idle() override;
@@ -62,15 +67,31 @@ public:
     const DeviceCapabilities& get_capabilities() const override;
 
 private:
-    struct ThreadResources {
-        VkCommandPool command_pool = VK_NULL_HANDLE;
+    struct FrameData {
         VkCommandBuffer command_buffer = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
+        VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
+        bool submitted = false;
+    };
+    
+    struct ThreadResources {
+        VkCommandPool command_pool = VK_NULL_HANDLE;
+        FrameData frames[FRAMES_IN_FLIGHT];
+        u32 current_frame = 0;
         bool recording = false;
+        u32 dispatch_count = 0;
+        bool explicit_batch = false;
     };
     
     ThreadResources& get_thread_resources();
+    void ensure_recording(ThreadResources& res);
+    void flush_frame(ThreadResources& res);
+    void retire_frame(FrameData& frame);
     VkDescriptorSet allocate_descriptor_set(VkDescriptorPool pool, VkDescriptorSetLayout layout);
+    void record_dispatch(ThreadResources& res, PipelineHandle& pipeline,
+                         const BufferBinding* buffers, u32 buffer_count,
+                         u32 group_x, u32 group_y, u32 group_z,
+                         const void* push_data, u32 push_size);
     
     VulkanContext _ctx;
     DeletionQueue _deletion_queue;
@@ -81,6 +102,7 @@ private:
     VkFence _imm_fence = VK_NULL_HANDLE;
     
     std::unordered_map<std::thread::id, ThreadResources> _thread_resources;
+    std::vector<std::pair<VkBuffer, VmaAllocation>> _deferred_buffers;
     mutable std::mutex _thread_mutex;
     mutable std::mutex _buffer_mutex;
     mutable std::mutex _descriptor_mutex;

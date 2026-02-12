@@ -188,10 +188,18 @@ void VulkanBackend::shutdown() {
     
     vkDeviceWaitIdle(_ctx.device.logical);
     
+    for (auto& [buf, alloc] : _deferred_buffers) {
+        vmaDestroyBuffer(_ctx.allocator, buf, alloc);
+    }
+    _deferred_buffers.clear();
+    
     {
         std::lock_guard<std::mutex> lock(_thread_mutex);
         for (auto& [tid, res] : _thread_resources) {
-            if (res.fence) vkDestroyFence(_ctx.device.logical, res.fence, nullptr);
+            for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+                if (res.frames[i].descriptor_pool) vkDestroyDescriptorPool(_ctx.device.logical, res.frames[i].descriptor_pool, nullptr);
+                if (res.frames[i].fence) vkDestroyFence(_ctx.device.logical, res.frames[i].fence, nullptr);
+            }
             if (res.command_pool) vkDestroyCommandPool(_ctx.device.logical, res.command_pool, nullptr);
         }
         _thread_resources.clear();
@@ -222,11 +230,21 @@ VulkanBackend::ThreadResources& VulkanBackend::get_thread_resources() {
     cmd_info.commandPool = res.command_pool;
     cmd_info.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     cmd_info.commandBufferCount = 1;
-    VK_CHECK(vkAllocateCommandBuffers(_ctx.device.logical, &cmd_info, &res.command_buffer));
     
     VkFenceCreateInfo fence_info = {VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    VK_CHECK(vkCreateFence(_ctx.device.logical, &fence_info, nullptr, &res.fence));
+    
+    VkDescriptorPoolSize pool_size = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, MAX_BINDINGS * MAX_DISPATCHES_PER_BATCH * 2};
+    VkDescriptorPoolCreateInfo dpool_info = {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpool_info.maxSets = MAX_DISPATCHES_PER_BATCH * 2;
+    dpool_info.poolSizeCount = 1;
+    dpool_info.pPoolSizes = &pool_size;
+    
+    for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+        VK_CHECK(vkAllocateCommandBuffers(_ctx.device.logical, &cmd_info, &res.frames[i].command_buffer));
+        VK_CHECK(vkCreateFence(_ctx.device.logical, &fence_info, nullptr, &res.frames[i].fence));
+        VK_CHECK(vkCreateDescriptorPool(_ctx.device.logical, &dpool_info, nullptr, &res.frames[i].descriptor_pool));
+    }
     
     std::lock_guard<std::mutex> lock(_thread_mutex);
     _thread_resources[tid] = res;
@@ -288,7 +306,21 @@ BufferHandle VulkanBackend::create_staging_buffer(u64 size) {
 void VulkanBackend::destroy_buffer(BufferHandle& buffer) {
     if (!buffer.native_handle) return;
     std::lock_guard<std::mutex> lock(_buffer_mutex);
-    vmaDestroyBuffer(_ctx.allocator, static_cast<VkBuffer>(buffer.native_handle), static_cast<VmaAllocation>(buffer.allocation));
+    
+    auto& res = get_thread_resources();
+    bool has_pending = res.recording;
+    for (u32 i = 0; i < FRAMES_IN_FLIGHT && !has_pending; ++i) {
+        has_pending = res.frames[i].submitted;
+    }
+    
+    if (has_pending) {
+        _deferred_buffers.push_back({
+            static_cast<VkBuffer>(buffer.native_handle),
+            static_cast<VmaAllocation>(buffer.allocation)
+        });
+    } else {
+        vmaDestroyBuffer(_ctx.allocator, static_cast<VkBuffer>(buffer.native_handle), static_cast<VmaAllocation>(buffer.allocation));
+    }
     buffer = {};
 }
 
@@ -297,6 +329,7 @@ void VulkanBackend::upload_buffer(BufferHandle& buffer, const void* data, u64 si
         memcpy(static_cast<char*>(buffer.mapped) + offset, data, size);
         vmaFlushAllocation(_ctx.allocator, static_cast<VmaAllocation>(buffer.allocation), offset, size);
     } else {
+        flush_pending();
         BufferHandle staging = create_staging_buffer(size);
         memcpy(staging.mapped, data, size);
         copy_buffer(staging, buffer, size, 0, offset);
@@ -306,9 +339,11 @@ void VulkanBackend::upload_buffer(BufferHandle& buffer, const void* data, u64 si
 
 void VulkanBackend::download_buffer(BufferHandle& buffer, void* data, u64 size, u64 offset) {
     if (buffer.mapped) {
+        flush_pending();
         vmaInvalidateAllocation(_ctx.allocator, static_cast<VmaAllocation>(buffer.allocation), offset, size);
         memcpy(data, static_cast<char*>(buffer.mapped) + offset, size);
     } else {
+        flush_pending();
         BufferHandle staging = create_staging_buffer(size);
         copy_buffer(buffer, staging, size, offset, 0);
         memcpy(data, staging.mapped, size);
@@ -426,25 +461,120 @@ VkDescriptorSet VulkanBackend::allocate_descriptor_set(VkDescriptorPool pool, Vk
     alloc.pSetLayouts = &layout;
     
     VkDescriptorSet set;
-    VkResult result = vkAllocateDescriptorSets(_ctx.device.logical, &alloc, &set);
-    
-    if (result != VK_SUCCESS) {
-        device_wait_idle();
-        vkResetDescriptorPool(_ctx.device.logical, pool, 0);
-        VK_CHECK(vkAllocateDescriptorSets(_ctx.device.logical, &alloc, &set));
-    }
+    VK_CHECK(vkAllocateDescriptorSets(_ctx.device.logical, &alloc, &set));
     
     return set;
 }
 
-void VulkanBackend::begin_recording() {
-    auto& res = get_thread_resources();
-    VK_CHECK(vkResetCommandBuffer(res.command_buffer, 0));
+void VulkanBackend::retire_frame(FrameData& frame) {
+    if (frame.descriptor_pool) {
+        vkResetDescriptorPool(_ctx.device.logical, frame.descriptor_pool, 0);
+    }
+}
+
+void VulkanBackend::ensure_recording(ThreadResources& res) {
+    if (res.recording) return;
+    
+    FrameData& frame = res.frames[res.current_frame];
+    
+    if (frame.submitted) {
+        VK_CHECK(vkWaitForFences(_ctx.device.logical, 1, &frame.fence, VK_TRUE, UINT64_MAX));
+        frame.submitted = false;
+        retire_frame(frame);
+    }
+    
+    VK_CHECK(vkResetCommandBuffer(frame.command_buffer, 0));
     
     VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VK_CHECK(vkBeginCommandBuffer(res.command_buffer, &begin));
+    VK_CHECK(vkBeginCommandBuffer(frame.command_buffer, &begin));
+    
     res.recording = true;
+    res.dispatch_count = 0;
+}
+
+void VulkanBackend::flush_frame(ThreadResources& res) {
+    if (!res.recording) return;
+    
+    FrameData& frame = res.frames[res.current_frame];
+    
+    VK_CHECK(vkEndCommandBuffer(frame.command_buffer));
+    res.recording = false;
+    
+    VK_CHECK(vkResetFences(_ctx.device.logical, 1, &frame.fence));
+    
+    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &frame.command_buffer;
+    
+    {
+        std::lock_guard<std::mutex> lock(_queue_mutex);
+        VK_CHECK(vkQueueSubmit(_ctx.device.compute_queue, 1, &submit, frame.fence));
+    }
+    
+    frame.submitted = true;
+    res.dispatch_count = 0;
+    res.current_frame = (res.current_frame + 1) % FRAMES_IN_FLIGHT;
+}
+
+void VulkanBackend::record_dispatch(ThreadResources& res, PipelineHandle& pipeline,
+                                     const BufferBinding* buffers, u32 buffer_count,
+                                     u32 group_x, u32 group_y, u32 group_z,
+                                     const void* push_data, u32 push_size) {
+    FrameData& frame = res.frames[res.current_frame];
+    
+    if (res.dispatch_count > 0) {
+        VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(frame.command_buffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            0, 1, &barrier, 0, nullptr, 0, nullptr);
+    }
+    
+    VkDescriptorSet desc_set = allocate_descriptor_set(
+        frame.descriptor_pool,
+        static_cast<VkDescriptorSetLayout>(pipeline.descriptor_layout));
+    
+    if (buffer_count > 0) {
+        VkDescriptorBufferInfo buf_infos[MAX_BINDINGS];
+        VkWriteDescriptorSet writes[MAX_BINDINGS];
+        
+        for (u32 i = 0; i < buffer_count; ++i) {
+            buf_infos[i].buffer = static_cast<VkBuffer>(buffers[i].buffer->native_handle);
+            buf_infos[i].offset = buffers[i].offset;
+            buf_infos[i].range = buffers[i].range ? buffers[i].range : (buffers[i].buffer->size - buffers[i].offset);
+            
+            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[i].dstSet = desc_set;
+            writes[i].dstBinding = i;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].descriptorCount = 1;
+            writes[i].pBufferInfo = &buf_infos[i];
+        }
+        vkUpdateDescriptorSets(_ctx.device.logical, buffer_count, writes, 0, nullptr);
+    }
+    
+    vkCmdBindPipeline(frame.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, static_cast<VkPipeline>(pipeline.pipeline));
+    vkCmdBindDescriptorSets(frame.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                            static_cast<VkPipelineLayout>(pipeline.layout), 0, 1, &desc_set, 0, nullptr);
+    
+    if (push_data && push_size > 0) {
+        vkCmdPushConstants(frame.command_buffer, static_cast<VkPipelineLayout>(pipeline.layout),
+                           VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
+    }
+    
+    vkCmdDispatch(frame.command_buffer, group_x, group_y, group_z);
+    res.dispatch_count++;
+}
+
+void VulkanBackend::begin_recording() {
+    auto& res = get_thread_resources();
+    if (res.recording && !res.explicit_batch) {
+        flush_frame(res);
+    }
+    ensure_recording(res);
+    res.explicit_batch = true;
 }
 
 void VulkanBackend::record_compute(PipelineHandle& pipeline, const std::vector<BufferBinding>& buffers,
@@ -453,83 +583,89 @@ void VulkanBackend::record_compute(PipelineHandle& pipeline, const std::vector<B
     auto& res = get_thread_resources();
     if (!res.recording) { LOG_ERROR("Must call begin_recording first"); return; }
     
-    VkDescriptorSet desc_set = allocate_descriptor_set(
-        static_cast<VkDescriptorPool>(pipeline.descriptor_pool),
-        static_cast<VkDescriptorSetLayout>(pipeline.descriptor_layout));
-    
-    if (!buffers.empty()) {
-        std::vector<VkDescriptorBufferInfo> buf_infos(buffers.size());
-        std::vector<VkWriteDescriptorSet> writes(buffers.size());
-        
-        for (size_t i = 0; i < buffers.size(); ++i) {
-            buf_infos[i].buffer = static_cast<VkBuffer>(buffers[i].buffer->native_handle);
-            buf_infos[i].offset = buffers[i].offset;
-            buf_infos[i].range = buffers[i].range ? buffers[i].range : (buffers[i].buffer->size - buffers[i].offset);
-            
-            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            writes[i].dstSet = desc_set;
-            writes[i].dstBinding = static_cast<u32>(i);
-            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[i].descriptorCount = 1;
-            writes[i].pBufferInfo = &buf_infos[i];
-        }
-        vkUpdateDescriptorSets(_ctx.device.logical, static_cast<u32>(writes.size()), writes.data(), 0, nullptr);
-    }
-    
-    vkCmdBindPipeline(res.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, static_cast<VkPipeline>(pipeline.pipeline));
-    vkCmdBindDescriptorSets(res.command_buffer, VK_PIPELINE_BIND_POINT_COMPUTE, 
-                            static_cast<VkPipelineLayout>(pipeline.layout), 0, 1, &desc_set, 0, nullptr);
-    
-    if (push_data && push_size > 0) {
-        vkCmdPushConstants(res.command_buffer, static_cast<VkPipelineLayout>(pipeline.layout),
-                           VK_SHADER_STAGE_COMPUTE_BIT, 0, push_size, push_data);
-    }
-    
-    vkCmdDispatch(res.command_buffer, group_x, group_y, group_z);
+    record_dispatch(res, pipeline, buffers.data(), static_cast<u32>(buffers.size()),
+                    group_x, group_y, group_z, push_data, push_size);
 }
 
 void VulkanBackend::end_recording() {
     auto& res = get_thread_resources();
     if (!res.recording) return;
     
-    VK_CHECK(vkEndCommandBuffer(res.command_buffer));
-    res.recording = false;
-    
-    VK_CHECK(vkResetFences(_ctx.device.logical, 1, &res.fence));
-    
-    VkSubmitInfo submit = {VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &res.command_buffer;
-    
-    {
-        std::lock_guard<std::mutex> lock(_queue_mutex);
-        VK_CHECK(vkQueueSubmit(_ctx.device.compute_queue, 1, &submit, res.fence));
-    }
+    res.explicit_batch = false;
+    flush_frame(res);
 }
 
 void VulkanBackend::execute_compute(PipelineHandle& pipeline, const std::vector<BufferBinding>& buffers,
                                     u32 group_x, u32 group_y, u32 group_z,
                                     const void* push_data, u32 push_size) {
-    begin_recording();
-    record_compute(pipeline, buffers, group_x, group_y, group_z, push_data, push_size);
-    end_recording();
-    synchronize();
+    auto& res = get_thread_resources();
+    ensure_recording(res);
+    record_dispatch(res, pipeline, buffers.data(), static_cast<u32>(buffers.size()),
+                    group_x, group_y, group_z, push_data, push_size);
+    
+    if (res.dispatch_count >= MAX_DISPATCHES_PER_BATCH) {
+        flush_frame(res);
+    }
+}
+
+void VulkanBackend::flush_pending() {
+    auto& res = get_thread_resources();
+    if (!res.recording || res.explicit_batch) return;
+    
+    flush_frame(res);
+    
+    for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+        if (res.frames[i].submitted) {
+            VK_CHECK(vkWaitForFences(_ctx.device.logical, 1, &res.frames[i].fence, VK_TRUE, UINT64_MAX));
+            res.frames[i].submitted = false;
+            retire_frame(res.frames[i]);
+        }
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(_buffer_mutex);
+        for (auto& [buf, alloc] : _deferred_buffers) {
+            vmaDestroyBuffer(_ctx.allocator, buf, alloc);
+        }
+        _deferred_buffers.clear();
+    }
 }
 
 void VulkanBackend::synchronize() {
     auto& res = get_thread_resources();
-    VK_CHECK(vkWaitForFences(_ctx.device.logical, 1, &res.fence, VK_TRUE, UINT64_MAX));
+    
+    if (res.recording && !res.explicit_batch) {
+        flush_frame(res);
+    }
+    
+    for (u32 i = 0; i < FRAMES_IN_FLIGHT; ++i) {
+        if (res.frames[i].submitted) {
+            VK_CHECK(vkWaitForFences(_ctx.device.logical, 1, &res.frames[i].fence, VK_TRUE, UINT64_MAX));
+            res.frames[i].submitted = false;
+            retire_frame(res.frames[i]);
+        }
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(_buffer_mutex);
+        for (auto& [buf, alloc] : _deferred_buffers) {
+            vmaDestroyBuffer(_ctx.allocator, buf, alloc);
+        }
+        _deferred_buffers.clear();
+    }
 }
 
 void VulkanBackend::memory_barrier() {
     auto& res = get_thread_resources();
     if (!res.recording) return;
     
+    FrameData& frame = res.frames[res.current_frame];
+    
     VkMemoryBarrier barrier = {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
     barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     
-    vkCmdPipelineBarrier(res.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    vkCmdPipelineBarrier(frame.command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &barrier, 0, nullptr, 0, nullptr);
 }
 

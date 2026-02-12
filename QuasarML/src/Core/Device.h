@@ -38,6 +38,7 @@ public:
     
     void begin_batch();
     void end_batch();
+    void flush_pending();
     void synchronize();
     
 private:

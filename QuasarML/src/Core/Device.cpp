@@ -93,6 +93,10 @@ void Device::end_batch() {
     _in_batch = false;
 }
 
+void Device::flush_pending() {
+    if (_backend) _backend->flush_pending();
+}
+
 void Device::synchronize() {
     if (_backend) _backend->synchronize();
 }

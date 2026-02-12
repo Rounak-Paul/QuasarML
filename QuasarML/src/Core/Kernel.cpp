@@ -55,7 +55,7 @@ void Kernel::clear_bindings() {
 }
 
 void Kernel::execute(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
-    std::vector<BufferBinding> buffers(_bindings.size());
+    BufferBinding buffers[8];
     for (size_t i = 0; i < _bindings.size(); ++i) {
         auto t = _bindings[i].lock();
         QS_ASSERT(t, "Tensor binding expired");
@@ -63,11 +63,12 @@ void Kernel::execute(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void*
         buffers[i].offset = t->element_offset() * t->element_size();
         buffers[i].range = t->size_bytes();
     }
-    _device->backend()->execute_compute(_pipeline, buffers, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
+    std::vector<BufferBinding> buf_vec(buffers, buffers + _bindings.size());
+    _device->backend()->execute_compute(_pipeline, buf_vec, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
 }
 
 void Kernel::record(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* push_data) {
-    std::vector<BufferBinding> buffers(_bindings.size());
+    BufferBinding buffers[8];
     for (size_t i = 0; i < _bindings.size(); ++i) {
         auto t = _bindings[i].lock();
         QS_ASSERT(t, "Tensor binding expired");
@@ -75,7 +76,8 @@ void Kernel::record(u32 dispatch_x, u32 dispatch_y, u32 dispatch_z, const void* 
         buffers[i].offset = t->element_offset() * t->element_size();
         buffers[i].range = t->size_bytes();
     }
-    _device->backend()->record_compute(_pipeline, buffers, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
+    std::vector<BufferBinding> buf_vec(buffers, buffers + _bindings.size());
+    _device->backend()->record_compute(_pipeline, buf_vec, dispatch_x, dispatch_y, dispatch_z, push_data, _push_size);
 }
 
 u32 Kernel::optimal_dispatch_1d(u32 total, u32 local_size) const {
