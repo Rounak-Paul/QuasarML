@@ -101,4 +101,8 @@ void Device::synchronize() {
     if (_backend) _backend->synchronize();
 }
 
+void Device::wait_idle() {
+    if (_backend) _backend->device_wait_idle();
+}
+
 }

@@ -40,6 +40,7 @@ public:
     void end_batch();
     void flush_pending();
     void synchronize();
+    void wait_idle();
     
 private:
     std::unique_ptr<Backend> _backend;

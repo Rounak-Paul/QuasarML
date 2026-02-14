@@ -352,6 +352,8 @@ void VulkanBackend::download_buffer(BufferHandle& buffer, void* data, u64 size, 
 }
 
 void VulkanBackend::copy_buffer(BufferHandle& src, BufferHandle& dst, u64 size, u64 src_offset, u64 dst_offset) {
+    std::lock_guard<std::mutex> lock(_queue_mutex);
+    
     vkResetFences(_ctx.device.logical, 1, &_imm_fence);
     
     VkCommandBufferBeginInfo begin = {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};

@@ -57,11 +57,11 @@ std::string matmul_shader_simple(DataType dtype, u32 tile_size) {
     ss << ShaderGen::buffer_binding(0, "A", dtype, true);
     ss << ShaderGen::buffer_binding(1, "B", dtype, true);
     ss << ShaderGen::buffer_binding(2, "C", dtype, false);
-    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
+    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; uint base_wg_row; };\n\n";
     ss << "shared " << type << " As[" << tile_size << "][" << tile_size << " + 1];\n";
     ss << "shared " << type << " Bs[" << tile_size << "][" << tile_size << " + 1];\n\n";
     ss << "void main() {\n";
-    ss << "    uint row = gl_GlobalInvocationID.y;\n";
+    ss << "    uint row = (gl_WorkGroupID.x + base_wg_row) * " << tile_size << " + gl_LocalInvocationID.y;\n";
     ss << "    uint col = gl_GlobalInvocationID.x;\n";
     ss << "    uint lr = gl_LocalInvocationID.y;\n";
     ss << "    uint lc = gl_LocalInvocationID.x;\n";
@@ -94,13 +94,13 @@ std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size)
     ss << ShaderGen::buffer_binding(0, "A", dtype, true);
     ss << ShaderGen::buffer_binding(1, "B", dtype, true);
     ss << ShaderGen::buffer_binding(2, "C", dtype, false);
-    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; };\n\n";
+    ss << "layout(push_constant) uniform PushConstants { uint M; uint K; uint N; uint base_row; };\n\n";
     ss << "shared " << type << " tile_a[BS][TS][TS + 1];\n";
     ss << "shared " << type << " tile_b[BS][TS][TS + 1];\n\n";
     ss << "void main() {\n";
     ss << "    uint lr = gl_LocalInvocationID.x;\n";
     ss << "    uint lc = gl_LocalInvocationID.y;\n";
-    ss << "    uint base_row = gl_WorkGroupID.x * EFF;\n";
+    ss << "    uint base_row_tile = (gl_WorkGroupID.x + base_row) * EFF;\n";
     ss << "    uint base_col = gl_WorkGroupID.y * EFF;\n";
     ss << "    " << type << " acc[BS][BS];\n";
     ss << "    for (uint i = 0; i < BS; ++i)\n";
@@ -110,7 +110,7 @@ std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size)
     ss << "    for (uint t = 0; t < num_tiles; ++t) {\n";
     ss << "        uint tile_k = t * TS;\n";
     ss << "        for (uint bi = 0; bi < BS; ++bi) {\n";
-    ss << "            uint row = base_row + bi * TS + lr;\n";
+    ss << "            uint row = base_row_tile + bi * TS + lr;\n";
     ss << "            uint col_k = tile_k + lc;\n";
     ss << "            tile_a[bi][lr][lc] = (row < M && col_k < K) ? A[row * K + col_k] : " << type << "(0);\n";
     ss << "        }\n";
@@ -148,7 +148,7 @@ std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size)
     ss << "    }\n";
     ss << "    for (uint bi = 0; bi < BS; ++bi) {\n";
     ss << "        for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "            uint out_row = base_row + bi * TS + lr;\n";
+    ss << "            uint out_row = base_row_tile + bi * TS + lr;\n";
     ss << "            uint out_col = base_col + bj * TS + lc;\n";
     ss << "            if (out_row < M && out_col < N) C[out_row * N + out_col] = acc[bi][bj];\n";
     ss << "        }\n";
@@ -239,7 +239,7 @@ std::shared_ptr<Tensor> matmul(Device& device, std::shared_ptr<Tensor> a, std::s
         shader_code = matmul_shader_simple(a->dtype(), params.tile_size);
     }
     
-    struct { u32 M; u32 K; u32 N; } pc = { M, K, N };
+    struct { u32 M; u32 K; u32 N; u32 base_row; } pc = { M, K, N, 0 };
     auto kernel = get_or_create_kernel(device, key, shader_code, 3, sizeof(pc));
     
     kernel->bind(0, a);
@@ -248,7 +248,24 @@ std::shared_ptr<Tensor> matmul(Device& device, std::shared_ptr<Tensor> a, std::s
     
     u32 gx = (M + params.effective_tile - 1) / params.effective_tile;
     u32 gy = (N + params.effective_tile - 1) / params.effective_tile;
-    kernel->execute(gx, gy, 1, &pc);
+    
+    constexpr u32 MAX_WORKGROUPS_PER_DISPATCH = 4096;
+    u32 total_workgroups = gx * gy;
+    
+    if (total_workgroups <= MAX_WORKGROUPS_PER_DISPATCH) {
+        pc.base_row = 0;
+        kernel->execute(gx, gy, 1, &pc);
+    } else {
+        u32 rows_per_batch = MAX_WORKGROUPS_PER_DISPATCH / gy;
+        if (rows_per_batch == 0) rows_per_batch = 1;
+        
+        for (u32 row_start = 0; row_start < gx; row_start += rows_per_batch) {
+            u32 batch_rows = (row_start + rows_per_batch > gx) ? (gx - row_start) : rows_per_batch;
+            pc.base_row = row_start;
+            kernel->execute(batch_rows, gy, 1, &pc);
+            device.backend()->synchronize();
+        }
+    }
     
     return result;
 }

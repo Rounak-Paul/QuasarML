@@ -88,6 +88,10 @@ inline void synchronize() {
     device().synchronize();
 }
 
+inline void flush_pending() {
+    device().flush_pending();
+}
+
 inline TensorPtr zeros(const std::vector<u32>& shape, DataType dtype = DataType::F32) {
     auto t = device().create_tensor(shape, dtype);
     t->zero();
