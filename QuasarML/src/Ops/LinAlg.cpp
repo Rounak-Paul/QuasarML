@@ -137,10 +137,10 @@ std::string matmul_shader_blocked(DataType dtype, u32 tile_size, u32 block_size)
     ss << "            }\n";
     ss << "            for (uint bi = 0; bi < BS; ++bi) {\n";
     ss << "                for (uint bj = 0; bj < BS; ++bj) {\n";
-    ss << "                    acc[bi][bj] += a_reg[bi][0] * b_reg[bj][0];\n";
-    ss << "                    acc[bi][bj] += a_reg[bi][1] * b_reg[bj][1];\n";
-    ss << "                    acc[bi][bj] += a_reg[bi][2] * b_reg[bj][2];\n";
-    ss << "                    acc[bi][bj] += a_reg[bi][3] * b_reg[bj][3];\n";
+    ss << "                    acc[bi][bj] = fma(a_reg[bi][0], b_reg[bj][0], acc[bi][bj]);\n";
+    ss << "                    acc[bi][bj] = fma(a_reg[bi][1], b_reg[bj][1], acc[bi][bj]);\n";
+    ss << "                    acc[bi][bj] = fma(a_reg[bi][2], b_reg[bj][2], acc[bi][bj]);\n";
+    ss << "                    acc[bi][bj] = fma(a_reg[bi][3], b_reg[bj][3], acc[bi][bj]);\n";
     ss << "                }\n";
     ss << "            }\n";
     ss << "        }\n";
