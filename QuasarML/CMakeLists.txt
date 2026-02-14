@@ -5,8 +5,8 @@ file(GLOB_RECURSE SOURCES CONFIGURE_DEPENDS
     src/*.h
     src/**/*.inl
 )
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_library(QuasarML SHARED ${SOURCES})
-set_target_properties(QuasarML PROPERTIES LINKER_LANGUAGE CXX)
 target_compile_definitions(QuasarML PRIVATE QS_BUILD_DLL)
 
 # Target-level performance flags
@@ -75,7 +75,6 @@ endif()
 find_library(SHADERC_LIB 
     NAMES shaderc_shared shaderc
     PATHS ${Vulkan_INCLUDE_DIRS}/../lib
-    NO_DEFAULT_PATH
 )
 
 if(SHADERC_LIB)
